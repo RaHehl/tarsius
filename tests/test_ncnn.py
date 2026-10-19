@@ -16,7 +16,7 @@ from tarsius import (
 )
 from tarsius.backends import ncnn as ncnn_module
 
-if not os.environ.get("TARSIUS_REQUIRE_NCNN") == "1":
+if os.environ.get("TARSIUS_REQUIRE_NCNN") != "1":
     # CI sets this where ncnn is installed: a silent skip would hide a missing model.
     pytest.importorskip("ncnn")
 
