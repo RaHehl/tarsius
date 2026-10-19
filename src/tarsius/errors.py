@@ -37,7 +37,7 @@ class RoiError(TarsiusError, ValueError):
 
     def __reduce__(self) -> tuple[object, ...]:
         """Keep the axis when copied or pickled."""
-        return (_rebuild_roi_error, (str(self), self.axis))
+        return (_rebuild_roi_error, (str(self), self.axis), self.__dict__)
 
 
 def _rebuild_roi_error(

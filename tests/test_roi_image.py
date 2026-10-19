@@ -104,6 +104,8 @@ def test_percent_roundtrip() -> None:
     roi = Roi.from_percent(12.5, 10, 56, 45.5)
     assert roi.as_tuple() == pytest.approx((0.125, 0.1, 0.56, 0.455))
     assert Roi.from_percent(7, 14, 29, 57).as_percent() == (7, 14, 29, 57)
+    assert Roi(1 / 3, 0, 1, 1).as_percent() == (33.333333, 0.0, 100.0, 100.0)
+    assert all(type(v) is float for v in Roi(0.3, 0, 1, 1).as_percent())
 
 
 def test_box_matches_crop() -> None:
@@ -119,13 +121,26 @@ def test_encode_jpeg_roundtrip() -> None:
 
 
 def test_roi_error_survives_copy() -> None:
-    with pytest.raises(RoiError) as err:
-        Roi(0.5, 0, 0.4, 1)
-    for clone in (copy.copy(err.value), pickle.loads(pickle.dumps(err.value))):
-        assert clone.axis == "horizontal"
-        assert str(clone) == str(err.value)
+    for bounds, axis in (
+        ((0.5, 0, 0.4, 1), "horizontal"),
+        ((0, 0.6, 1, 0.5), "vertical"),
+    ):
+        with pytest.raises(RoiError) as err:
+            Roi(*bounds)
+        err.value.add_note("seen in a test")
+        for clone in (copy.copy(err.value), pickle.loads(pickle.dumps(err.value))):
+            assert clone.axis == axis
+            assert str(clone) == str(err.value)
+            assert clone.__notes__ == ["seen in a test"]
 
 
 def test_encode_jpeg_accepts_alpha() -> None:
     image = Image.new("RGBA", (10, 10), (1, 2, 3, 128))
     assert load_image(encode_jpeg(image)).mode == "RGB"
+
+
+def test_load_image_rejects_huge_non_jpeg() -> None:
+    buffer = BytesIO()
+    Image.new("1", (5000, 5000)).save(buffer, "PNG")
+    with pytest.raises(ImageError, match="too large"):
+        load_image(buffer.getvalue())

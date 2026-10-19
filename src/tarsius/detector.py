@@ -11,14 +11,15 @@ import numpy as np
 from PIL import Image, ImageStat
 
 from .classifier import Classifier, Result, Status
-from .errors import BlankRegionError, ImageError, TarsiusError
+from .errors import BlankRegionError, ImageError
 from .features import FeatureBackend, Features, Vector, extract_features
 from .image import FRAME_SIDE, encode_jpeg, load_image
 from .roi import Roi
 
 MAX_PER_STATE = 50
-# Grey level spread below which a region shows nothing. Real IR night crops
-# stay above 10, a grey placeholder with sensor noise below 2.
+# Grey level spread of the whole frame below which the camera shows nothing.
+# Real frames, IR nights included, stay above 20, a grey placeholder with
+# sensor noise below 2. The region itself may be uniform in one state.
 BLANK_STDDEV = 4.0
 
 
@@ -28,7 +29,6 @@ class SkipReason(StrEnum):
     BLANK = "blank"
     UNDECODABLE = "undecodable"
     UNKNOWN_STATE = "unknown_state"
-    UNUSABLE = "unusable"
 
 
 # Arrays do not compare with ==, so identity equality.
@@ -51,7 +51,7 @@ class LoadReport:
     # Key -> reason for items that could not be used.
     skipped: Mapping[str, SkipReason] = field(default_factory=dict)
     # Keys dropped to stay within the per-state cap.
-    evicted: Sequence[str] = ()
+    evicted: tuple[str, ...] = ()
 
 
 class StateDetector:
@@ -85,7 +85,10 @@ class StateDetector:
         ``frame_side`` bounds the longer side frames are normalized to; small
         details in a small region need more.
         """
-        if isinstance(states, str) or len(set(states)) != len(states):
+        if isinstance(states, str):
+            raise ValueError("states must be a sequence of distinct names")
+        states = tuple(states)
+        if len(set(states)) != len(states):
             raise ValueError("states must be a sequence of distinct names")
         if len(states) < 2:
             raise ValueError("states must be at least two distinct names")
@@ -192,8 +195,9 @@ class StateDetector:
         """
         Replace all references with stored ``(key, original, state)`` items.
 
-        Unusable items are skipped and reported instead of failing the load.
-        For a repeated key the last item wins.
+        Everything not in ``items`` is dropped. Unusable items are skipped and
+        reported instead of failing the load; for a repeated key the last item
+        wins. A backend failure raises and leaves the references unchanged.
         """
         latest = {key: (data, state) for key, data, state in items}
         with self._lock:
@@ -211,8 +215,6 @@ class StateDetector:
                     skipped[key] = SkipReason.UNDECODABLE
                 except BlankRegionError:
                     skipped[key] = SkipReason.BLANK
-                except TarsiusError:
-                    skipped[key] = SkipReason.UNUSABLE
                 else:
                     features_by_key[key] = features
                     labels[key] = state
@@ -228,7 +230,7 @@ class StateDetector:
                 for key, state in self._labels.items()
             )
             self._classifier = classifier
-            return LoadReport(len(self._labels), skipped, evicted)
+            return LoadReport(len(self._labels), skipped, tuple(evicted))
 
     def remove(self, keys: str | Iterable[str]) -> None:
         """Remove one or more references; unknown keys are ignored."""
@@ -242,7 +244,8 @@ class StateDetector:
         Classify a frame; not ready until every state has a reference.
 
         Raises ImageError for undecodable data and BlankRegionError for a
-        frame whose region shows nothing, e.g. from an offline camera.
+        frame that shows nothing, e.g. from an offline camera. While not ready
+        the frame is not looked at.
         """
         classifier = self._classifier
         if len(classifier.counts()) < len(self._states):
@@ -255,9 +258,8 @@ class StateDetector:
         return result
 
     def _checked_features(self, image: Image.Image) -> Features:
-        region = self._roi.crop(image)
-        if ImageStat.Stat(region.convert("L")).stddev[0] < BLANK_STDDEV:
-            raise BlankRegionError("the region has no structure to compare")
+        if ImageStat.Stat(image.convert("L")).stddev[0] < BLANK_STDDEV:
+            raise BlankRegionError("the frame shows nothing, the camera may be offline")
         features = extract_features(self._backend, image, self._roi)
         if not features.has_structure:
             raise BlankRegionError("the region has no structure to compare")

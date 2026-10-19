@@ -59,7 +59,9 @@ class Roi:
 
     def as_percent(self) -> tuple[float, float, float, float]:
         """Return ``(left, top, right, bottom)`` in percent, without float noise."""
-        left, top, right, bottom = (round(value * 100, 6) for value in astuple(self))
+        left, top, right, bottom = (
+            float(round(value * 100, 6)) for value in astuple(self)
+        )
         return left, top, right, bottom
 
     def box(self, size: tuple[int, int]) -> tuple[int, int, int, int]:

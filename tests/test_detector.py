@@ -210,7 +210,7 @@ def test_load_skips_unusable_references(make_scene) -> None:
             "broken": SkipReason.UNDECODABLE,
             "gone": SkipReason.UNKNOWN_STATE,
         },
-        [],
+        (),
     )
     assert detector.references() == {"car": "on", "empty": "off"}
 
@@ -236,7 +236,7 @@ def test_load_last_duplicate_wins(make_scene) -> None:
             ("b", _frame(make_scene, car=False, seed=0), "off"),
         ]
     )
-    assert report == LoadReport(2, {}, [])
+    assert report == LoadReport(2, {}, ())
     assert detector.references() == {"a": "on", "b": "off"}
 
 
@@ -284,17 +284,17 @@ def test_cap_keeps_distinct_and_newest(make_scene) -> None:
     assert set(detector.references()) == {"distinct", "twin2"}
 
 
-@pytest.mark.parametrize("keys", ["a", ["a", "b"]], ids=["one", "several"])
+@pytest.mark.parametrize("keys", ["ref-a", ["ref-a", "ref-b"]], ids=["one", "several"])
 def test_remove(make_scene, keys) -> None:
     detector = _detector()
-    _teach(detector, make_scene, "a", car=True, seed=0)
-    _teach(detector, make_scene, "b", car=True, seed=1)
-    _teach(detector, make_scene, "c", car=False, seed=0)
+    _teach(detector, make_scene, "ref-a", car=True, seed=0)
+    _teach(detector, make_scene, "ref-b", car=True, seed=1)
+    _teach(detector, make_scene, "ref-c", car=False, seed=0)
 
     detector.remove(keys)
     detector.remove(["missing"])
 
-    expected = {"b": "on", "c": "off"} if keys == "a" else {"c": "off"}
+    expected = {"ref-b": "on", "ref-c": "off"} if keys == "ref-a" else {"ref-c": "off"}
     assert detector.references() == expected
 
 
@@ -381,23 +381,26 @@ class _StubBackend:
         return self._edges.extract(image)
 
 
-@pytest.mark.parametrize(
-    ("error", "reason"),
-    [
-        pytest.param(BackendError("ncnn failed"), SkipReason.UNUSABLE, id="backend"),
-        pytest.param(None, SkipReason.BLANK, id="no_structure"),
-    ],
-)
-def test_load_skips_backend_failures(
-    make_scene, error: Exception | None, reason: SkipReason
-) -> None:
-    detector = StateDetector(_StubBackend(110, error), FULL_FRAME, ("on", "off"))
+def test_load_skips_region_without_structure(make_scene) -> None:
+    detector = StateDetector(_StubBackend(110, None), FULL_FRAME, ("on", "off"))
     odd = encode_jpeg(make_scene(car=True, seed=0).resize((110, 60)))
     report = detector.load(
         [("odd", odd, "on"), ("car", _frame(make_scene, car=True, seed=0), "on")]
     )
-    assert report.skipped == {"odd": reason}
+    assert report.skipped == {"odd": SkipReason.BLANK}
     assert detector.backend is not None
+
+
+def test_load_backend_failure_keeps_references(make_scene) -> None:
+    """A broken backend must not look like every reference being unusable."""
+    detector = StateDetector(
+        _StubBackend(110, BackendError("ncnn failed")), FULL_FRAME, ("on", "off")
+    )
+    detector.load([("car", _frame(make_scene, car=True, seed=0), "on")])
+    odd = encode_jpeg(make_scene(car=True, seed=0).resize((110, 60)))
+    with pytest.raises(BackendError):
+        detector.load([("odd", odd, "on")])
+    assert detector.references() == {"car": "on"}
 
 
 def test_classify_snapshot_missing_a_state(
@@ -414,3 +417,88 @@ def test_classify_snapshot_missing_a_state(
     )
     frame = _frame(make_scene, car=True, seed=1)
     assert detector.classify(frame).status is Status.NOT_READY
+
+
+def test_uniform_region_in_a_real_frame_is_usable(make_scene) -> None:
+    """A region may be plain in one state, only a blank frame is refused."""
+    corner = Roi(0.0, 0.85, 0.15, 1.0)
+    detector = StateDetector(EdgeBackend(), corner, ("on", "off"))
+    frame = make_scene(car=True, seed=0, clutter=False)
+    region = np.asarray(corner.crop(frame).convert("L"), dtype=float)
+    assert region.std() < 4.0
+    prepared = detector.prepare(encode_jpeg(frame))
+    assert detector.add("plain", prepared, state="off") == []
+
+
+def _greedy_reference(vectors: dict[str, np.ndarray], cap: int) -> list[str]:
+    """Drop the most redundant one at a time, recomputing from scratch."""
+    keys = list(vectors)
+    dropped = []
+    while len(keys) > cap:
+        matrix = np.stack([vectors[key] for key in keys])
+        similarity = matrix @ matrix.T
+        np.fill_diagonal(similarity, -np.inf)
+        drop = keys[int(similarity.max(axis=1).argmax())]
+        keys.remove(drop)
+        dropped.append(drop)
+    return dropped
+
+
+def test_load_eviction_matches_one_by_one(make_scene) -> None:
+    """Several evictions at once choose like repeated single evictions."""
+    detector = _detector(max_per_state=3)
+    frames = []
+    # Distinct frames, so no near ties decide the order by float noise.
+    for seed in range(8):
+        image = make_scene(car=True, seed=seed, clutter=seed > 4)
+        frames.append((f"k{seed}", encode_jpeg(image), "on"))
+    vectors = {key: detector.prepare(data).features.vector for key, data, _ in frames}
+
+    report = detector.load(frames)
+
+    assert list(report.evicted) == _greedy_reference(vectors, 3)
+    assert detector.counts() == {"on": 3}
+
+
+def test_add_after_eviction_keeps_the_cap(make_scene) -> None:
+    detector = _detector(max_per_state=1)
+    _teach(detector, make_scene, "a", car=True, seed=0)
+    _teach(detector, make_scene, "b", car=True, seed=1)
+    _teach(detector, make_scene, "c", car=True, seed=2)
+    assert detector.counts() == {"on": 1}
+    assert len(detector.references()) == 1
+
+
+def test_replaced_key_counts_as_newest(make_scene) -> None:
+    detector = _detector(max_per_state=2)
+    twin = detector.prepare(_frame(make_scene, car=True, seed=1, clutter=False))
+    detector.add("old", twin, state="on")
+    detector.add(
+        "other", detector.prepare(_frame(make_scene, car=True, seed=4)), state="on"
+    )
+    # Re-teaching "old" makes it the newest copy of the twin.
+    detector.add("old", twin, state="on")
+    assert detector.add("new", twin, state="on") == ["old"]
+
+
+def test_removed_keys_are_forgotten(make_scene) -> None:
+    detector = _detector(max_per_state=1)
+    _teach(detector, make_scene, "ref-1", car=True, seed=0)
+    detector.remove("ref-1")
+    assert detector.references() == {}
+    # A forgotten key no longer counts against the cap.
+    assert _teach(detector, make_scene, "ref-2", car=True, seed=1) == []
+
+
+def test_load_keeps_k(make_scene) -> None:
+    detector = _detector(k=1)
+    car_far = _frame(make_scene, car=True, seed=0, shift=(4, 3))
+    frames = [
+        ("car", _frame(make_scene, car=True, seed=0), "on"),
+        ("car_far", car_far, "on"),
+        ("empty", _frame(make_scene, car=False, seed=0), "off"),
+    ]
+    detector.load(frames)
+    result = detector.classify(_frame(make_scene, car=True, seed=0))
+    # With k=1 only the best match counts.
+    assert result.scores["on"] == pytest.approx(1.0, abs=1e-6)

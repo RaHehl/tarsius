@@ -25,6 +25,9 @@ def load_image(data: bytes, *, max_side: int = FRAME_SIDE) -> Image.Image:
     try:
         encoded = Image.open(BytesIO(data))
         width, height = encoded.size
+        # Only JPEG decodes reduced; anything else this large is not a frame.
+        if encoded.format != "JPEG" and width * height > 16 * max_side * max_side:
+            raise ImageError(f"image of {width}x{height} is too large")
         scale = max_side / max(width, height)
         if scale < 1:
             # draft keeps both sides at or above the request.
