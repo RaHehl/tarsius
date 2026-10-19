@@ -30,6 +30,23 @@ Store `features.reference().to_bytes()` next to each confirmed frame and restore
 
 `NcnnBackend` is the intended default. It stays an optional extra until ncnn ships a release that no longer requires `opencv-python`, which has no musllinux wheels. Without that, tarsius cannot install on Alpine (musl) systems such as Home Assistant OS, whose Core container is Alpine based. ncnn master already made opencv optional ([Tencent/ncnn@0ca5a4b](https://github.com/Tencent/ncnn/commit/0ca5a4b6d)), so the next ncnn release should unblock it.
 
+## Results so far
+
+One household, two garage cameras, 24 days of recorded history, day and IR night.
+References come from older frames, the test is the newest week.
+The table is the harder camera: a dark car and clutter that gets moved around in front of it (459 frames, 164 in the test week).
+The other camera scores 100 % with both backends.
+
+| Backend | Region | 2 confirmed segments per state | 5 per state |
+|---|---|---|---|
+| ncnn | tight | 0 % wrong, 0 % unsure | 0 % wrong, 0 % unsure |
+| ncnn | wide, with clutter | 0 % wrong, 0 % unsure | 0 % wrong, 0 % unsure |
+| edges | tight | 1.8 % wrong, 3.5 % unsure | 0 % wrong, 1.8 % unsure |
+| edges | wide, with clutter | 27 % wrong, 7.6 % unsure | 20 % wrong, 8.5 % unsure |
+
+About 20 ms per 4 MP frame including JPEG decoding, for either backend, on an x86 desktop with one thread.
+A small sample, not a guarantee. `scripts/history_split.py` runs the same evaluation on your own recordings.
+
 ## Development
 
 ```sh
