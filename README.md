@@ -45,7 +45,7 @@ Store `features.reference().to_bytes()` next to each confirmed frame and restore
 - `NcnnBackend`: SqueezeNet 1.1 ImageNet features on [ncnn](https://github.com/Tencent/ncnn), install with `tarsius[ncnn]`. Tolerates clutter and lighting changes, a rough region is enough.
 - `EdgeBackend`: numpy only, a baseline. Needs a tight region that still shows some static structure when the object is gone.
 
-`NcnnBackend` is the intended default. It stays an optional extra until ncnn ships a release that no longer requires `opencv-python`, which has no musllinux wheels. Without that, tarsius cannot install on Alpine (musl) systems such as Home Assistant OS, whose Core container is Alpine based. ncnn master already made opencv optional ([Tencent/ncnn@0ca5a4b](https://github.com/Tencent/ncnn/commit/0ca5a4b6d)), so the next ncnn release should unblock it.
+`NcnnBackend` is the intended default. It stays an optional extra until ncnn ships a release that no longer requires `opencv-python`, which has no musllinux wheels. Without that, tarsius cannot install on Alpine (musl) systems such as Home Assistant OS, whose Core container is Alpine based. ncnn master already made opencv optional ([Tencent/ncnn@0ca5a4b](https://github.com/Tencent/ncnn/commit/0ca5a4b6d)), so the next ncnn release should unblock it. The `ncnn` extra also needs Python 3.14 until ncnn publishes wheels for 3.15; the rest of tarsius supports 3.14 and 3.15.
 
 ## Results so far
 
