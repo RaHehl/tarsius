@@ -16,8 +16,8 @@ from tarsius import (
 )
 from tarsius.backends import ncnn as ncnn_module
 
-if not os.environ.get("CI"):
-    # CI must run these: a silent skip would hide a release without the model.
+if os.environ.get("TARSIUS_REQUIRE_NCNN") != "1":
+    # CI sets this where ncnn is installed: a silent skip would hide a missing model.
     pytest.importorskip("ncnn")
 
 CAR_SPOT = Roi(0.28, 0.22, 0.72, 0.88)
@@ -29,7 +29,7 @@ def backend() -> NcnnBackend:
     try:
         return NcnnBackend()
     except BackendError:
-        if os.environ.get("CI"):
+        if os.environ.get("TARSIUS_REQUIRE_NCNN") == "1":
             raise
         pytest.skip("SqueezeNet model not built, run scripts/build_model.sh")
 

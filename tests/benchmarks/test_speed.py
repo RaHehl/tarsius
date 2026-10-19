@@ -47,7 +47,7 @@ def test_ncnn_extract(benchmark, frame_jpeg: bytes) -> None:
     try:
         backend = NcnnBackend()
     except ImportError, BackendError:
-        if os.environ.get("CI"):
+        if os.environ.get("TARSIUS_REQUIRE_NCNN") == "1":
             raise
         pytest.skip("ncnn or its model is not available")
     image = load_image(frame_jpeg)
