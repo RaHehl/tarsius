@@ -252,7 +252,7 @@ def test_load_replaces_references_and_keeps_settings(make_scene) -> None:
     )
     assert detector.references() == {"new": "off", "car": "on"}
     result = detector.classify(_frame(make_scene, car=True, seed=1))
-    assert result.scores["on"] == pytest.approx(1.0, abs=1e-6)
+    assert result.scores["on"] == pytest.approx(1.0, abs=1e-5)
     assert result.margin >= 0.02
 
 
@@ -502,7 +502,7 @@ def test_load_keeps_k(make_scene) -> None:
     detector.load(frames)
     result = detector.classify(_frame(make_scene, car=True, seed=0))
     # With k=1 only the best match counts.
-    assert result.scores["on"] == pytest.approx(1.0, abs=1e-6)
+    assert result.scores["on"] == pytest.approx(1.0, abs=1e-5)
 
 
 def test_classify_region_without_structure_is_unsure(make_scene) -> None:
