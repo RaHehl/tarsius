@@ -1,0 +1,15 @@
+__pycache__/
+*.py[cod]
+.venv/
+dist/
+.coverage
+coverage.xml
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+src/tarsius/models/*.bin
+src/tarsius/models/*.param
+src/tarsius/models/*.lock
+build/
+*.egg-info/
+htmlcov/

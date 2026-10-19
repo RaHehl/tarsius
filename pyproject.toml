@@ -1,0 +1,92 @@
+[project]
+name = "tarsius"
+version = "0.0.0"
+license = "Apache-2.0 AND BSD-2-Clause"
+license-files = ["LICENSE", "NOTICE", "src/tarsius/models/LICENSE.squeezenet"]
+description = "Local, training-free state detection for a region of a camera image"
+authors = [{ name = "Raphael Hehl" }]
+readme = "README.md"
+keywords = ["camera", "computer-vision", "home-assistant", "ncnn", "presence"]
+requires-python = ">=3.14"
+dependencies = [
+    "numpy>=2.0",
+    "pillow>=11.0",
+]
+classifiers = [
+    "Development Status :: 2 - Pre-Alpha",
+    "Intended Audience :: Developers",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Scientific/Engineering :: Image Recognition",
+    "Topic :: Software Development :: Libraries",
+    "Typing :: Typed",
+]
+
+[project.optional-dependencies]
+ncnn = ["ncnn>=1.0.20260526"]
+
+[project.urls]
+"Repository" = "https://github.com/RaHehl/tarsius"
+"Bug Tracker" = "https://github.com/RaHehl/tarsius/issues"
+"Changelog" = "https://github.com/RaHehl/tarsius/releases"
+
+[dependency-groups]
+dev = [
+    "mypy>=1.18",
+    "pytest>=9",
+    "pytest-codspeed>=4",
+    "pytest-cov>=7",
+    "ruff>=0.17",
+]
+
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build]
+# The converted model is gitignored (built by scripts/build_model.sh) but ships.
+artifacts = ["src/tarsius/models/*.param", "src/tarsius/models/*.bin"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/tarsius"]
+
+[tool.hatch.build.targets.sdist]
+include = ["src/tarsius", "tests", "scripts", "NOTICE", "README.md"]
+
+[tool.pytest.ini_options]
+addopts = "-Wdefault --cov=tarsius --cov-report=term-missing:skip-covered"
+pythonpath = ["src"]
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "if TYPE_CHECKING",
+    "raise NotImplementedError",
+    "^\\s*\\.\\.\\.$",
+]
+
+[tool.mypy]
+check_untyped_defs = true
+disallow_any_generics = true
+disallow_untyped_defs = true
+warn_unused_ignores = true
+strict_equality = true
+mypy_path = "src/"
+exclude = ["scripts/"]
+
+[[tool.mypy.overrides]]
+module = ["ncnn"]
+ignore_missing_imports = true
+
+[tool.ruff]
+target-version = "py314"
+line-length = 88
+
+[tool.ruff.lint]
+select = ["B", "C4", "D", "E", "F", "I", "N", "PERF", "PL", "RUF", "S", "SIM", "UP", "W"]
+ignore = ["D203", "D212", "PLR2004", "S101"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["D", "PLR0913", "S311"]
+"scripts/**" = ["D", "T201", "S"]
