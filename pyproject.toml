@@ -36,7 +36,6 @@ ncnn = ["ncnn>=1.0.20260526"]
 dev = [
     "mypy>=1.18",
     "pytest>=9",
-    "pytest-codspeed>=4",
     "pytest-cov>=7",
     "ruff>=0.17",
 ]
@@ -68,11 +67,7 @@ exclude_lines = [
 ]
 
 [tool.mypy]
-check_untyped_defs = true
-disallow_any_generics = true
-disallow_untyped_defs = true
-warn_unused_ignores = true
-strict_equality = true
+strict = true
 mypy_path = "src/"
 exclude = ["scripts/"]
 

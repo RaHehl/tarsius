@@ -3,6 +3,13 @@ name: Publish to PyPI
 on:
   release:
     types: [published]
+  # Re-run a release whose publish run was lost, e.g. in an Actions outage.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag to publish
+        required: true
+        type: string
 
 permissions: {}
 
@@ -14,6 +21,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ github.event.release.tag_name || inputs.tag }}
           persist-credentials: false
       - name: Build model
         run: |
@@ -26,7 +34,7 @@ jobs:
           python-version: "3.14"
       - name: Set package version from release tag
         env:
-          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          RELEASE_TAG: ${{ github.event.release.tag_name || inputs.tag }}
         run: uv version --frozen "${RELEASE_TAG}"
       - run: uv build
       - name: Check the model is in both dists
