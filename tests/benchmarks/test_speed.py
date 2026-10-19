@@ -1,4 +1,4 @@
-"""CodSpeed benchmarks; plain pytest runs each once as a smoke test."""
+"""Benchmarks: `pytest tests/benchmarks --codspeed`; plain pytest runs each once."""
 
 from __future__ import annotations
 
