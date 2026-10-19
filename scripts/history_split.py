@@ -108,10 +108,11 @@ def main():
         roi = Roi(*rois[camera])
         for name, factory in {"edges": EdgeBackend, "ncnn": NcnnBackend}.items():
             make_detector = functools.partial(StateDetector, factory(), roi, states)
+            preparer = make_detector()
             prepared = {}
             for _, frame, _, data in rows:
                 with contextlib.suppress(BlankRegionError):
-                    prepared[frame] = make_detector().prepare(data)
+                    prepared[frame] = preparer.prepare(data)
             print(f"{camera} {name}")
             for budget in (1, 2, 5):
                 fixed = dict.fromkeys(
