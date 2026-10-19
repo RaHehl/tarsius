@@ -59,15 +59,15 @@ References come from older frames, the test is the newest week.
 The table is the harder camera: a dark car and clutter that gets moved around in front of it (459 frames, 164 in the test week).
 The other camera scores 100 % with both backends.
 
-| Backend | Region | 2 confirmed segments per state | 5 per state |
+| Backend | Region | 2 confirmed segments per state (about 10 frames) | 5 per state (about 25 frames) |
 |---|---|---|---|
 | ncnn | tight | 0 % wrong, 0 % unsure | 0 % wrong, 0 % unsure |
 | ncnn | wide, with clutter | 0 % wrong, 0 % unsure | 0 % wrong, 0 % unsure |
-| edges | tight | 1.8 % wrong, 3.5 % unsure | 0.1 % wrong, 1.8 % unsure |
+| edges | tight | 1.8 % wrong, 3.5 % unsure | 0.1 % wrong, 1.7 % unsure |
 | edges | wide, with clutter | 27 % wrong, 7.4 % unsure | 20 % wrong, 8.8 % unsure |
 
-About 20 ms per 4 MP frame including JPEG decoding, for either backend, on an x86 desktop with one thread.
-A small sample, not a guarantee. `scripts/history_split.py` runs the same evaluation on your own recordings.
+About 30 ms per 4 MP frame with edges and 36 ms with ncnn, including JPEG decoding, on one thread of an Intel i5-8400T.
+A small sample, not a guarantee. `scripts/history_split.py` runs the same evaluation with `StateDetector` on your own recordings. It also reports how often the detector would ask when unsure answers are confirmed.
 
 ## Development
 
