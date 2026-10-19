@@ -22,7 +22,11 @@ class BackendMismatchError(TarsiusError, ValueError):
 
 
 class BlankRegionError(TarsiusError, ValueError):
-    """The region has nothing to compare, e.g. a grey frame of an offline camera."""
+    """The region has nothing to compare, e.g. a plain wall or a black corner."""
+
+
+class BlankFrameError(BlankRegionError):
+    """The whole frame shows nothing, e.g. a grey frame of an offline camera."""
 
 
 class RoiError(TarsiusError, ValueError):

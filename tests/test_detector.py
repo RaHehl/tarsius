@@ -9,6 +9,7 @@ from PIL import Image
 from tarsius import (
     FULL_FRAME,
     BackendError,
+    BlankFrameError,
     BlankRegionError,
     EdgeBackend,
     ImageError,
@@ -502,3 +503,29 @@ def test_load_keeps_k(make_scene) -> None:
     result = detector.classify(_frame(make_scene, car=True, seed=0))
     # With k=1 only the best match counts.
     assert result.scores["on"] == pytest.approx(1.0, abs=1e-6)
+
+
+def test_classify_region_without_structure_is_unsure(make_scene) -> None:
+    """A dark or plain region in a working camera is unsure, not an error."""
+    detector = StateDetector(_StubBackend(110, None), FULL_FRAME, ("on", "off"))
+    detector.add(
+        "car", detector.prepare(_frame(make_scene, car=True, seed=0)), state="on"
+    )
+    detector.add(
+        "empty", detector.prepare(_frame(make_scene, car=False, seed=0)), state="off"
+    )
+    plain = encode_jpeg(make_scene(car=True, seed=1).resize((110, 60)))
+
+    result = detector.classify(plain)
+
+    assert result.status is Status.UNSURE
+
+
+def test_blank_errors_tell_frame_from_region(make_scene) -> None:
+    detector = StateDetector(_StubBackend(110, None), FULL_FRAME, ("on", "off"))
+    with pytest.raises(BlankFrameError):
+        detector.prepare(_grey(1.5))
+    plain = encode_jpeg(make_scene(car=True, seed=1).resize((110, 60)))
+    with pytest.raises(BlankRegionError) as err:
+        detector.prepare(plain)
+    assert not isinstance(err.value, BlankFrameError)

@@ -9,6 +9,7 @@ from .detector import LoadReport, Prepared, SkipReason, StateDetector
 from .errors import (
     BackendError,
     BackendMismatchError,
+    BlankFrameError,
     BlankRegionError,
     ImageError,
     RoiError,
@@ -27,6 +28,7 @@ __all__ = [
     "FULL_FRAME",
     "BackendError",
     "BackendMismatchError",
+    "BlankFrameError",
     "BlankRegionError",
     "Classifier",
     "EdgeBackend",

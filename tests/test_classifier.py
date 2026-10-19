@@ -250,22 +250,68 @@ def test_rejects_bad_settings(margin: float, k: int) -> None:
         Classifier("test/1", margin=margin, k=k)
 
 
+def _vote(state: str | None, candidate: str | None = None) -> Result:
+    if state is None:
+        return Result(Status.UNSURE, None, candidate, 0.0)
+    return Result(Status.CONFIDENT, state, state, 0.5)
+
+
 @pytest.mark.parametrize(
-    ("states", "expected"),
+    ("results", "status", "state", "candidate"),
     [
-        ([], None),
-        ([None, None], None),
-        (["a", "a", "b"], "a"),
-        (["a", "b"], None),
-        (["a", None, None], None),
-        (["a", "a", None], "a"),
+        pytest.param([], Status.NOT_READY, None, None, id="empty"),
+        pytest.param(
+            [Result(Status.NOT_READY)] * 2, Status.NOT_READY, None, None, id="not_ready"
+        ),
+        pytest.param(
+            [_vote("a"), _vote("a"), _vote("b")],
+            Status.CONFIDENT,
+            "a",
+            "a",
+            id="two_of_three",
+        ),
+        pytest.param([_vote("a"), _vote("b")], Status.UNSURE, None, "a", id="tie"),
+        pytest.param(
+            [_vote("a"), _vote(None, "b"), _vote(None, "b")],
+            Status.UNSURE,
+            None,
+            "b",
+            id="mostly_unsure",
+        ),
+        pytest.param(
+            [_vote(None, "b"), _vote(None, "b")],
+            Status.UNSURE,
+            None,
+            "b",
+            id="all_unsure",
+        ),
+        pytest.param(
+            [_vote("a"), _vote("a"), _vote(None)],
+            Status.CONFIDENT,
+            "a",
+            "a",
+            id="one_unsure",
+        ),
+        pytest.param(
+            [Result(Status.NOT_READY), _vote("a"), _vote("a")],
+            Status.CONFIDENT,
+            "a",
+            "a",
+            id="partly_ready",
+        ),
     ],
 )
-def test_majority(states: list[str | None], expected: str | None) -> None:
-    results = [
-        Result(Status.CONFIDENT, s, s) if s else Result(Status.UNSURE) for s in states
-    ]
-    assert majority(results) == expected
+def test_majority(
+    results: list[Result], status: Status, state: str | None, candidate: str | None
+) -> None:
+    result = majority(results)
+    assert (result.status, result.state, result.candidate) == (status, state, candidate)
+
+
+def test_majority_reports_shares() -> None:
+    result = majority([_vote("a"), _vote("a"), _vote("b"), _vote(None)])
+    assert result.scores == {"a": 0.5, "b": 0.25}
+    assert result.margin == 0.5
 
 
 @pytest.mark.parametrize("share", [0.49, 1.0])
@@ -275,9 +321,9 @@ def test_majority_rejects_share(share: float) -> None:
 
 
 def test_majority_stricter_share() -> None:
-    results = [Result(Status.CONFIDENT, "a", "a")] * 3 + [Result(Status.UNSURE)]
-    assert majority(results, min_share=0.7) == "a"
-    assert majority(results, min_share=0.75) is None
+    results = [_vote("a")] * 3 + [_vote(None)]
+    assert majority(results, min_share=0.7).state == "a"
+    assert majority(results, min_share=0.75).status is Status.UNSURE
 
 
 def test_unit_ignores_offset_and_scale() -> None:

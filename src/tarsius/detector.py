@@ -11,7 +11,7 @@ import numpy as np
 from PIL import Image, ImageStat
 
 from .classifier import Classifier, Result, Status
-from .errors import BlankRegionError, ImageError
+from .errors import BlankFrameError, BlankRegionError, ImageError
 from .features import FeatureBackend, Features, Vector, extract_features
 from .image import FRAME_SIDE, encode_jpeg, load_image
 from .roi import Roi
@@ -159,8 +159,9 @@ class StateDetector:
         """
         Check a frame and extract its features.
 
-        Raises ImageError for undecodable data and BlankRegionError when the
-        region shows nothing to compare.
+        Raises ImageError for undecodable data, BlankFrameError when the whole
+        frame shows nothing and BlankRegionError when the region has nothing
+        to compare, so it cannot serve as a reference.
         """
         original = encode_jpeg(load_image(data, max_side=self._frame_side))
         # Extract from what is stored, so a reload gives the same features.
@@ -243,23 +244,28 @@ class StateDetector:
         """
         Classify a frame; not ready until every state has a reference.
 
-        Raises ImageError for undecodable data and BlankRegionError for a
-        frame that shows nothing, e.g. from an offline camera. While not ready
-        the frame is not looked at.
+        Raises ImageError for undecodable data and BlankFrameError for a frame
+        that shows nothing, e.g. from an offline camera. A region without
+        structure is answered as unsure. While not ready the frame is not
+        looked at.
         """
         classifier = self._classifier
         if len(classifier.counts()) < len(self._states):
             return Result(Status.NOT_READY)
         image = load_image(data, max_side=self._frame_side)
-        result = classifier.classify(self._checked_features(image))
+        self._check_frame(image)
+        result = classifier.classify(extract_features(self._backend, image, self._roi))
         # A reference may have been removed since the check above.
         if len(result.scores) < len(self._states):
             return Result(Status.NOT_READY)
         return result
 
-    def _checked_features(self, image: Image.Image) -> Features:
+    def _check_frame(self, image: Image.Image) -> None:
         if ImageStat.Stat(image.convert("L")).stddev[0] < BLANK_STDDEV:
-            raise BlankRegionError("the frame shows nothing, the camera may be offline")
+            raise BlankFrameError("the frame shows nothing, the camera may be offline")
+
+    def _checked_features(self, image: Image.Image) -> Features:
+        self._check_frame(image)
         features = extract_features(self._backend, image, self._roi)
         if not features.has_structure:
             raise BlankRegionError("the region has no structure to compare")
