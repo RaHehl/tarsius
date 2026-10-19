@@ -21,6 +21,10 @@ Local, training-free state detection for a region of a camera image: is the car 
 
 You confirm a few frames per state, tarsius compares new frames against them and answers with a state or "unsure". Nothing leaves the machine and nothing gets trained.
 
+## Why tarsius
+
+Tarsiers are small nocturnal primates whose eyes are each about as large as their brain. Lots of eye, little brain, and very good at seeing in the dark. That is the idea here too: no training and no model to learn, just careful looking, including at IR night frames.
+
 ```python
 from tarsius import Classifier, NcnnBackend, Roi, extract_features, load_image
 
