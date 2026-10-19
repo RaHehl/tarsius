@@ -7,6 +7,8 @@ from dataclasses import astuple, dataclass
 
 from PIL import Image
 
+from .errors import RoiError
+
 
 @dataclass(frozen=True, slots=True)
 class Roi:
@@ -20,9 +22,18 @@ class Roi:
     def __post_init__(self) -> None:
         """Reject empty or out-of-frame rectangles."""
         if not (0.0 <= self.left < self.right <= 1.0):
-            raise ValueError(f"invalid horizontal range {self.left}..{self.right}")
+            raise RoiError(
+                f"invalid horizontal range {self.left}..{self.right}", axis="horizontal"
+            )
         if not (0.0 <= self.top < self.bottom <= 1.0):
-            raise ValueError(f"invalid vertical range {self.top}..{self.bottom}")
+            raise RoiError(
+                f"invalid vertical range {self.top}..{self.bottom}", axis="vertical"
+            )
+
+    @classmethod
+    def from_percent(cls, left: float, top: float, right: float, bottom: float) -> Roi:
+        """Create a region from percentages of the frame."""
+        return cls(left / 100, top / 100, right / 100, bottom / 100)
 
     @classmethod
     def from_cells(
@@ -46,14 +57,25 @@ class Roi:
         """Return ``(left, top, right, bottom)``, e.g. for config storage."""
         return astuple(self)
 
-    def crop(self, image: Image.Image) -> Image.Image:
-        """Return the region of ``image``, at least one pixel in each direction."""
-        width, height = image.size
+    def as_percent(self) -> tuple[float, float, float, float]:
+        """Return ``(left, top, right, bottom)`` in percent, without float noise."""
+        left, top, right, bottom = (
+            float(round(value * 100, 6)) for value in astuple(self)
+        )
+        return left, top, right, bottom
+
+    def box(self, size: tuple[int, int]) -> tuple[int, int, int, int]:
+        """Return the pixel box for an image size, at least one pixel each way."""
+        width, height = size
         left = min(round(self.left * width), width - 1)
         top = min(round(self.top * height), height - 1)
         right = max(round(self.right * width), left + 1)
         bottom = max(round(self.bottom * height), top + 1)
-        return image.crop((left, top, right, bottom))
+        return left, top, right, bottom
+
+    def crop(self, image: Image.Image) -> Image.Image:
+        """Return the region of ``image``."""
+        return image.crop(self.box(image.size))
 
 
 FULL_FRAME = Roi()

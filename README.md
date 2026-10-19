@@ -26,23 +26,24 @@ You confirm a few frames per state, tarsius compares new frames against them and
 Tarsiers are small nocturnal primates whose eyes are each about as large as their brain. Lots of eye, little brain, and very good at seeing in the dark. That is the idea here too: no training and no model to learn, just careful looking, including at IR night frames.
 
 ```python
-from tarsius import Classifier, NcnnBackend, Roi, extract_features, load_image
+from tarsius import EdgeBackend, Roi, StateDetector
 
-backend = NcnnBackend()
-spot = Roi(0.10, 0.10, 0.60, 0.50)
-classifier = Classifier.for_backend(backend)
-car = extract_features(backend, load_image(car_jpeg), spot)
-empty = extract_features(backend, load_image(empty_jpeg), spot)
-classifier.add("ref-1", car, state="occupied")
-classifier.add("ref-2", empty, state="free")
+detector = StateDetector(EdgeBackend(), Roi.from_percent(10, 10, 60, 50), ("on", "off"))
 
-result = classifier.classify(extract_features(backend, load_image(new_jpeg), spot))
+# Teaching: check the frame, store prepared.original, add it.
+prepared = detector.prepare(car_jpeg)
+evicted = detector.add("ref-1", prepared, state="on")  # keys dropped by the cap
+detector.add("ref-2", detector.prepare(empty_jpeg), state="off")
+
+result = detector.classify(new_jpeg)
 result.status  # Status.CONFIDENT, Status.UNSURE or Status.NOT_READY
-result.state  # "occupied" or "free" when confident
+result.state  # "on" or "off" when confident
 result.candidate  # best guess, also when unsure
 ```
 
-Store `features.reference().to_bytes()` next to each confirmed frame and restore it with `Reference.from_bytes()`. On `FeaturesError`, extract again from the stored frame.
+After a restart, hand the stored originals back with `detector.load([(key, original, state), ...])`. References are always re-extracted with the current region and backend; unusable ones (blank, undecodable, unknown state) are skipped and reported in the returned `LoadReport` instead of failing. `prepare()` and `classify()` raise `ImageError` for undecodable data and `BlankFrameError` when the frame shows nothing, for example a grey frame from an offline camera. `prepare()` also raises `BlankRegionError` (the base class) when the region has nothing to compare, `classify()` answers such a region as unsure, without a candidate. `tarsius.outline(frame, roi)` draws the region on a frame with the same box rule as the comparison.
+
+All methods block; call them in an executor. They are safe to call from several threads: changes are serialized and `classify()` never waits for them.
 
 ## Backends
 
@@ -62,8 +63,8 @@ The other camera scores 100 % with both backends.
 |---|---|---|---|
 | ncnn | tight | 0 % wrong, 0 % unsure | 0 % wrong, 0 % unsure |
 | ncnn | wide, with clutter | 0 % wrong, 0 % unsure | 0 % wrong, 0 % unsure |
-| edges | tight | 1.8 % wrong, 3.5 % unsure | 0 % wrong, 1.8 % unsure |
-| edges | wide, with clutter | 27 % wrong, 7.6 % unsure | 20 % wrong, 8.5 % unsure |
+| edges | tight | 1.8 % wrong, 3.5 % unsure | 0.1 % wrong, 1.8 % unsure |
+| edges | wide, with clutter | 27 % wrong, 7.4 % unsure | 20 % wrong, 8.8 % unsure |
 
 About 20 ms per 4 MP frame including JPEG decoding, for either backend, on an x86 desktop with one thread.
 A small sample, not a guarantee. `scripts/history_split.py` runs the same evaluation on your own recordings.

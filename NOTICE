@@ -4,5 +4,5 @@ Copyright 2026 Raphael Hehl
 This product bundles the SqueezeNet v1.1 model
 (https://github.com/forresti/SqueezeNet), converted to ncnn with fp16
 weights. BSD-2-Clause, see tarsius/models/LICENSE.squeezenet.
-SqueezeNet by Forrest N. Iandola, Song Han, Matthew W. Moskewicz,
-Khalid Ashraf, William J. Dally and Kurt Keutzer.
+Copyright (c) 2016 Forrest N. Iandola and Matthew W. Moskewicz and
+Khalid Ashraf and Song Han and William J. Dally and Kurt Keutzer.
