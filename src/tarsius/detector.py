@@ -12,7 +12,7 @@ from PIL import Image
 from .classifier import Classifier, Result, Status
 from .errors import BlankRegionError, ImageError
 from .features import FeatureBackend, Features, Vector, extract_features
-from .image import encode_jpeg, load_image
+from .image import FRAME_SIDE, encode_jpeg, load_image
 from .roi import Roi
 
 MAX_PER_STATE = 50
@@ -58,8 +58,14 @@ class StateDetector:
         *,
         max_per_state: int = MAX_PER_STATE,
         k: int = 3,
+        frame_side: int = FRAME_SIDE,
     ) -> None:
-        """Create a detector for the given states, without references."""
+        """
+        Create a detector for the given states, without references.
+
+        ``frame_side`` bounds the longer side frames are normalized to; small
+        details in a small region need more.
+        """
         if len(set(states)) < 2 or len(set(states)) != len(states):
             raise ValueError("states must be at least two distinct names")
         if max_per_state < 1:
@@ -68,6 +74,7 @@ class StateDetector:
         self.roi = roi
         self.states = tuple(states)
         self.max_per_state = max_per_state
+        self.frame_side = frame_side
         self._k = k
         self._classifier = Classifier.for_backend(backend, k=k)
         self._lock = threading.Lock()
@@ -104,7 +111,7 @@ class StateDetector:
         Raises ImageError for undecodable data and BlankRegionError when the
         region shows nothing to compare.
         """
-        image = load_image(data)
+        image = load_image(data, max_side=self.frame_side)
         return Prepared(encode_jpeg(image), self._checked_features(image))
 
     def add(self, key: str, state: str, prepared: Prepared) -> list[str]:
@@ -133,7 +140,9 @@ class StateDetector:
                 skipped[key] = "unknown_state"
                 continue
             try:
-                features = self._checked_features(load_image(data))
+                features = self._checked_features(
+                    load_image(data, max_side=self.frame_side)
+                )
             except ImageError:
                 skipped[key] = "undecodable"
             except BlankRegionError:
@@ -162,8 +171,10 @@ class StateDetector:
         """Classify a frame; not ready until every state has a reference."""
         if not self.ready:
             return Result(Status.NOT_READY)
-        features = extract_features(self.backend, load_image(data), self.roi)
-        return self._classifier.classify(features)
+        image = load_image(data, max_side=self.frame_side)
+        return self._classifier.classify(
+            extract_features(self.backend, image, self.roi)
+        )
 
     def most_redundant(self, state: str) -> str | None:
         """Return the reference most similar to another one of ``state``."""

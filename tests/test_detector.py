@@ -78,6 +78,16 @@ def test_prepare_normalizes_the_original(make_scene) -> None:
     assert load_image(prepared.original).size == (1024, 576)
 
 
+def test_frame_side_is_configurable(make_scene) -> None:
+    detector = _detector(frame_side=2048)
+    big = make_scene(car=True, seed=0).resize((3840, 2160))
+
+    prepared = detector.prepare(_jpeg(big))
+
+    assert detector.frame_side == 2048
+    assert load_image(prepared.original, max_side=4096).size == (2048, 1152)
+
+
 def test_stored_original_matches_live_frame(make_scene) -> None:
     """References and live frames go through the same normalization."""
     detector = _detector()
