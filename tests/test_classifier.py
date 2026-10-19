@@ -1,18 +1,15 @@
 from __future__ import annotations
 
-from io import BytesIO
-
 import numpy as np
 import pytest
 
 from tarsius import (
     FULL_FRAME,
     BackendMismatchError,
+    BlankRegionError,
     Classifier,
     EdgeBackend,
     Features,
-    FeaturesError,
-    Reference,
     Result,
     Roi,
     Status,
@@ -243,7 +240,7 @@ def test_rejects_blank_reference(make_scene) -> None:
     backend = EdgeBackend()
     blank = make_scene(car=False, seed=0, clutter=False).point(lambda _: 128)
     classifier = Classifier.for_backend(backend)
-    with pytest.raises(ValueError, match="no structure"):
+    with pytest.raises(BlankRegionError, match="no structure"):
         classifier.add("blank", extract_features(backend, blank), state="free")
 
 
@@ -251,67 +248,6 @@ def test_rejects_blank_reference(make_scene) -> None:
 def test_rejects_bad_settings(margin: float, k: int) -> None:
     with pytest.raises(ValueError):
         Classifier("test/1", margin=margin, k=k)
-
-
-def test_reference_roundtrip(make_scene) -> None:
-    backend = EdgeBackend()
-    features = extract_features(backend, make_scene(car=True, seed=0))
-
-    data = features.reference().to_bytes()
-    loaded = Reference.from_bytes(data)
-
-    assert loaded.backend_id == backend.id
-    assert loaded.vector.dtype == np.float32
-    np.testing.assert_array_equal(loaded.vector, features.vector)
-    # Only the vector is stored, not the 25 shifted query rows.
-    assert len(data) < features.vector.nbytes * 2
-
-
-def test_restored_reference_classifies(make_scene) -> None:
-    backend = EdgeBackend()
-    classifier = Classifier.for_backend(backend)
-    for car, state in ((True, "occupied"), (False, "free")):
-        features = extract_features(backend, make_scene(car=car, seed=0), CAR_SPOT)
-        restored = Reference.from_bytes(features.reference().to_bytes())
-        classifier.add(state, restored, state=state)
-    query = extract_features(backend, make_scene(car=True, seed=7), CAR_SPOT)
-    assert classifier.classify(query).state == "occupied"
-
-
-@pytest.mark.parametrize(
-    "data",
-    [b"", b"garbage", Reference("x/1", np.zeros(2, np.float32)).to_bytes()[:40]],
-)
-def test_reference_unreadable(data: bytes) -> None:
-    with pytest.raises(FeaturesError):
-        Reference.from_bytes(data)
-
-
-def test_reference_other_format() -> None:
-    buffer = BytesIO()
-    np.savez(
-        buffer,
-        format=np.array(2),
-        backend_id=np.array("x/1"),
-        vector=np.ones(2, np.float32),
-    )
-    with pytest.raises(FeaturesError, match="format 2"):
-        Reference.from_bytes(buffer.getvalue())
-
-
-def test_reference_missing_field() -> None:
-    buffer = BytesIO()
-    np.savez(buffer, format=np.array(1), vector=np.ones(2, np.float32))
-    with pytest.raises(FeaturesError, match="unreadable"):
-        Reference.from_bytes(buffer.getvalue())
-
-
-def test_features_compare_by_identity() -> None:
-    features = _features(1, 0, 0, 0)
-    same = features
-    assert features == same
-    assert features != _features(1, 0, 0, 0)
-    assert len({features, features.reference()}) == 2
 
 
 @pytest.mark.parametrize(
@@ -350,3 +286,32 @@ def test_unit_ignores_offset_and_scale() -> None:
     np.testing.assert_allclose(unit(pattern * 3 + 7), unit(pattern), atol=1e-6)
     assert float(np.linalg.norm(unit(pattern))) == pytest.approx(1.0)
     assert not unit(np.ones((2, 2), np.float32)).any()
+
+
+def test_features_compare_by_identity() -> None:
+    features = _features(1, 0, 0, 0)
+    same = features
+    assert features == same
+    assert features != _features(1, 0, 0, 0)
+
+
+def test_add_many_rebuilds_once() -> None:
+    classifier = _toy()
+    classifier.add_many(
+        [
+            ("a", _features(1, 0, 0, 0), "occupied"),
+            ("b", _features(0, 1, 0, 0), "free"),
+        ]
+    )
+    assert classifier.references() == {"a": "occupied", "b": "free"}
+    classifier.add_many([])
+    assert len(classifier) == 2
+
+
+def test_add_many_rejects_mixed_lengths() -> None:
+    classifier = _toy()
+    with pytest.raises(BackendMismatchError, match="vector length 3"):
+        classifier.add_many(
+            [("a", _features(1, 0, 0, 0), "on"), ("b", _features(1, 0, 0), "off")]
+        )
+    assert len(classifier) == 0

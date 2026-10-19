@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import threading
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import NamedTuple
@@ -11,8 +11,8 @@ from typing import NamedTuple
 import numpy as np
 import numpy.typing as npt
 
-from .errors import BackendMismatchError
-from .features import FeatureBackend, Features, Reference, Vector
+from .errors import BackendMismatchError, BlankRegionError
+from .features import FeatureBackend, Features, Vector
 
 
 class Status(StrEnum):
@@ -75,24 +75,35 @@ class Classifier:
         """Create a classifier with the backend's id and default margin."""
         return cls(backend.id, margin=backend.default_margin, k=k)
 
-    def add(self, key: str, features: Features | Reference, *, state: str) -> None:
+    def add(self, key: str, features: Features, *, state: str) -> None:
         """
         Add or replace the reference ``key``.
 
-        Raises ValueError for a region without any structure, e.g. a blank
-        frame from an offline camera, since it would match nothing.
+        Raises BlankRegionError for a region without any structure, since it
+        would match nothing.
         """
-        self._check(features.backend_id)
-        vector = features.vector
-        if not np.linalg.norm(vector) > 0:
-            raise ValueError("reference has no structure to compare")
+        self.add_many([(key, features, state)])
+
+    def add_many(self, items: Iterable[tuple[str, Features, str]]) -> None:
+        """Add or replace several ``(key, features, state)`` with one rebuild."""
+        checked = []
+        for key, features, state in items:
+            self._check(features.backend_id)
+            if not features.has_structure:
+                raise BlankRegionError(f"reference {key} has no structure to compare")
+            checked.append((key, state, features.vector))
+        if not checked:
+            return
         with self._lock:
-            index = self._index
-            if index is not None and index.matrix.shape[1] != vector.shape[0]:
-                raise BackendMismatchError(
-                    f"vector length {vector.shape[0]}, expected {index.matrix.shape[1]}"
-                )
-            self._refs[key] = (state, vector)
+            width = None if self._index is None else self._index.matrix.shape[1]
+            for _key, _state, vector in checked:
+                if width is not None and vector.shape[0] != width:
+                    raise BackendMismatchError(
+                        f"vector length {vector.shape[0]}, expected {width}"
+                    )
+                width = vector.shape[0]
+            for key, state, vector in checked:
+                self._refs[key] = (state, vector)
             self._index = self._build()
 
     def remove(self, key: str) -> None:
