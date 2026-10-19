@@ -141,7 +141,7 @@ def test_reload_gives_the_same_features(make_scene) -> None:
 @pytest.mark.parametrize("noise", [0.0, 1.5], ids=["flat", "noisy"])
 def test_blank_frames_are_rejected(noise: float) -> None:
     detector = _detector()
-    with pytest.raises(BlankRegionError):
+    with pytest.raises(BlankFrameError):
         detector.prepare(_grey(noise))
 
 
@@ -149,7 +149,7 @@ def test_classify_rejects_blank_and_garbage(make_scene) -> None:
     detector = _detector()
     _teach(detector, make_scene, "a", car=True, seed=0)
     _teach(detector, make_scene, "b", car=False, seed=0)
-    with pytest.raises(BlankRegionError):
+    with pytest.raises(BlankFrameError):
         detector.classify(_grey(1.5))
     with pytest.raises(ImageError):
         detector.classify(b"<html>502</html>")
@@ -519,6 +519,23 @@ def test_classify_region_without_structure_is_unsure(make_scene) -> None:
     result = detector.classify(plain)
 
     assert result.status is Status.UNSURE
+    assert result.candidate is None
+    assert result.scores == {"on": 0.0, "off": 0.0}
+
+
+def test_dark_frame_with_structure_is_not_blank(make_scene) -> None:
+    """A dim night frame still shows something, unlike an offline camera."""
+
+    # Grey level spread 5 to 9, real IR night frames measured 24 and more.
+    def dark(*, car: bool) -> bytes:
+        pixels = np.asarray(make_scene(car=car, seed=0), dtype=np.float32) * 0.3
+        return encode_jpeg(Image.fromarray(pixels.astype(np.uint8)))
+
+    detector = _detector()
+    detector.add("car", detector.prepare(dark(car=True)), state="on")
+    detector.add("empty", detector.prepare(dark(car=False)), state="off")
+
+    assert detector.classify(dark(car=True)).state == "on"
 
 
 def test_blank_errors_tell_frame_from_region(make_scene) -> None:

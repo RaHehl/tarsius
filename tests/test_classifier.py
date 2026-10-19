@@ -251,9 +251,10 @@ def test_rejects_bad_settings(margin: float, k: int) -> None:
 
 
 def _vote(state: str | None, candidate: str | None = None) -> Result:
+    scores = {"a": 0.1, "b": 0.1}
     if state is None:
-        return Result(Status.UNSURE, None, candidate, 0.0)
-    return Result(Status.CONFIDENT, state, state, 0.5)
+        return Result(Status.UNSURE, None, candidate, 0.0, scores)
+    return Result(Status.CONFIDENT, state, state, 0.5, scores)
 
 
 @pytest.mark.parametrize(
@@ -299,6 +300,23 @@ def _vote(state: str | None, candidate: str | None = None) -> Result:
             "a",
             id="partly_ready",
         ),
+        pytest.param(
+            [Result(Status.NOT_READY)] * 2 + [_vote("a")],
+            Status.NOT_READY,
+            None,
+            None,
+            id="mostly_not_ready",
+        ),
+        pytest.param(
+            [Result(Status.NOT_READY), _vote("a")],
+            Status.NOT_READY,
+            None,
+            None,
+            id="half_not_ready",
+        ),
+        pytest.param(
+            [_vote("b"), _vote("a")], Status.UNSURE, None, "b", id="tie_goes_first"
+        ),
     ],
 )
 def test_majority(
@@ -312,6 +330,19 @@ def test_majority_reports_shares() -> None:
     result = majority([_vote("a"), _vote("a"), _vote("b"), _vote(None)])
     assert result.scores == {"a": 0.5, "b": 0.25}
     assert result.margin == 0.5
+
+
+def test_majority_scores_every_state() -> None:
+    """States without a confident vote still get a share, like classify."""
+    result = majority([_vote(None, "b"), _vote(None, "b")])
+    assert result.scores == {"a": 0.0, "b": 0.0}
+    assert result.margin == 0.0
+
+
+def test_majority_margin_follows_candidate() -> None:
+    result = majority([_vote("a"), _vote(None, "b"), _vote(None, "b")])
+    assert (result.candidate, result.margin) == ("b", 0.0)
+    assert result.scores == {"a": pytest.approx(1 / 3), "b": 0.0}
 
 
 @pytest.mark.parametrize("share", [0.49, 1.0])

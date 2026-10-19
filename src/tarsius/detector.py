@@ -254,7 +254,11 @@ class StateDetector:
             return Result(Status.NOT_READY)
         image = load_image(data, max_side=self._frame_side)
         self._check_frame(image)
-        result = classifier.classify(extract_features(self._backend, image, self._roi))
+        features = extract_features(self._backend, image, self._roi)
+        if not features.has_structure:
+            # Every reference would score the same, there is no candidate.
+            return Result(Status.UNSURE, scores=dict.fromkeys(self._states, 0.0))
+        result = classifier.classify(features)
         # A reference may have been removed since the check above.
         if len(result.scores) < len(self._states):
             return Result(Status.NOT_READY)

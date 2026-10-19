@@ -33,7 +33,7 @@ result.state  # "on" or "off" when confident
 result.candidate  # best guess, also when unsure
 ```
 
-After a restart, hand the stored originals back with `detector.load([(key, original, state), ...])`. References are always re-extracted with the current region and backend; unusable ones (blank, undecodable, unknown state) are skipped and reported in the returned `LoadReport` instead of failing. `prepare()` and `classify()` raise `ImageError` for undecodable data and `BlankFrameError` when the frame shows nothing, for example a grey frame from an offline camera. `prepare()` also raises `BlankRegionError` (the base class) when the region has nothing to compare, `classify()` answers such a frame as unsure. `tarsius.outline(frame, roi)` draws the region on a frame with the same box rule as the comparison.
+After a restart, hand the stored originals back with `detector.load([(key, original, state), ...])`. References are always re-extracted with the current region and backend; unusable ones (blank, undecodable, unknown state) are skipped and reported in the returned `LoadReport` instead of failing. `prepare()` and `classify()` raise `ImageError` for undecodable data and `BlankFrameError` when the frame shows nothing, for example a grey frame from an offline camera. `prepare()` also raises `BlankRegionError` (the base class) when the region has nothing to compare, `classify()` answers such a region as unsure, without a candidate. `tarsius.outline(frame, roi)` draws the region on a frame with the same box rule as the comparison.
 
 All methods block; call them in an executor. They are safe to call from several threads: changes are serialized and `classify()` never waits for them.
 
