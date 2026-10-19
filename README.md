@@ -1,4 +1,8 @@
-# tarsius
+<p align="center">
+  <img src="https://raw.githubusercontent.com/RaHehl/tarsius/main/docs/logo.png" alt="tarsius logo" width="160">
+</p>
+
+<h1 align="center">tarsius</h1>
 
 <p align="center">
   <a href="https://github.com/RaHehl/tarsius/actions/workflows/ci.yml?query=branch%3Amain"><img src="https://github.com/RaHehl/tarsius/actions/workflows/ci.yml/badge.svg?branch=main" alt="CI"></a>
