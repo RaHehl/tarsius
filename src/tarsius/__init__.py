@@ -5,7 +5,7 @@ from importlib.metadata import version
 from .backends.edges import EdgeBackend
 from .backends.ncnn import NcnnBackend
 from .classifier import Classifier, Result, Status
-from .detector import LoadReport, Prepared, StateDetector
+from .detector import LoadReport, Prepared, SkipReason, StateDetector
 from .errors import (
     BackendError,
     BackendMismatchError,
@@ -15,7 +15,7 @@ from .errors import (
     TarsiusError,
 )
 from .features import FeatureBackend, Features, extract_features
-from .image import FRAME_SIDE, encode_jpeg, load_image
+from .image import FRAME_SIDE, load_image
 from .preview import outline
 from .roi import FULL_FRAME, Roi
 from .vote import majority
@@ -39,10 +39,10 @@ __all__ = [
     "Result",
     "Roi",
     "RoiError",
+    "SkipReason",
     "StateDetector",
     "Status",
     "TarsiusError",
-    "encode_jpeg",
     "extract_features",
     "load_image",
     "majority",

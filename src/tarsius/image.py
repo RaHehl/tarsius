@@ -32,7 +32,7 @@ def load_image(data: bytes, *, max_side: int = FRAME_SIDE) -> Image.Image:
                 "RGB", (max(1, int(width * scale)), max(1, int(height * scale)))
             )
         image = encoded.convert("RGB")
-    except (UnidentifiedImageError, OSError) as err:
+    except (UnidentifiedImageError, Image.DecompressionBombError, OSError) as err:
         raise ImageError(f"cannot decode image: {err}") from err
     image.thumbnail((max_side, max_side))
     return image
@@ -41,5 +41,5 @@ def load_image(data: bytes, *, max_side: int = FRAME_SIDE) -> Image.Image:
 def encode_jpeg(image: Image.Image, *, quality: int = 95) -> bytes:
     """Encode an image as JPEG."""
     buffer = BytesIO()
-    image.save(buffer, "JPEG", quality=quality)
+    image.convert("RGB").save(buffer, "JPEG", quality=quality)
     return buffer.getvalue()

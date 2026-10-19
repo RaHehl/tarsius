@@ -5,27 +5,42 @@ from __future__ import annotations
 import threading
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
+from enum import StrEnum
 
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageStat
 
 from .classifier import Classifier, Result, Status
-from .errors import BlankRegionError, ImageError
+from .errors import BlankRegionError, ImageError, TarsiusError
 from .features import FeatureBackend, Features, Vector, extract_features
 from .image import FRAME_SIDE, encode_jpeg, load_image
 from .roi import Roi
 
 MAX_PER_STATE = 50
+# Grey level spread below which a region shows nothing. Real IR night crops
+# stay above 10, a grey placeholder with sensor noise below 2.
+BLANK_STDDEV = 4.0
+
+
+class SkipReason(StrEnum):
+    """Why :meth:`StateDetector.load` did not use a stored item."""
+
+    BLANK = "blank"
+    UNDECODABLE = "undecodable"
+    UNKNOWN_STATE = "unknown_state"
+    UNUSABLE = "unusable"
 
 
 # Arrays do not compare with ==, so identity equality.
 @dataclass(frozen=True, slots=True, eq=False)
 class Prepared:
-    """A frame checked and ready to become a reference."""
+    """A frame checked and ready to become a reference of one detector."""
 
     # Normalized JPEG for the caller to store and pass to load() later.
     original: bytes
     features: Features
+    roi: Roi
+    frame_side: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -33,8 +48,8 @@ class LoadReport:
     """Outcome of loading stored references."""
 
     loaded: int
-    # Key -> reason for references that could not be used.
-    skipped: Mapping[str, str] = field(default_factory=dict)
+    # Key -> reason for items that could not be used.
+    skipped: Mapping[str, SkipReason] = field(default_factory=dict)
     # Keys dropped to stay within the per-state cap.
     evicted: Sequence[str] = ()
 
@@ -44,10 +59,14 @@ class StateDetector:
     The state of one region, learned from confirmed frames.
 
     Owns the region, the backend and the references. Callers store the
-    ``original`` of each prepared frame and hand it back to :meth:`load`,
-    so references are always re-extracted with the current region and
-    backend. All methods are blocking; run them in an executor. They may
-    run concurrently: :meth:`classify` reads an immutable snapshot.
+    ``original`` of each prepared frame and hand it back to :meth:`load`, so
+    references are always re-extracted with the current region and backend.
+    Originals are stored at ``frame_side``; raising it later means teaching
+    again. The settings are fixed; build a new detector to change them.
+
+    All methods block; call them in an executor. They are safe to call from
+    several threads: changes are serialized, :meth:`classify` reads an
+    immutable snapshot and never waits for them.
     """
 
     def __init__(
@@ -66,15 +85,19 @@ class StateDetector:
         ``frame_side`` bounds the longer side frames are normalized to; small
         details in a small region need more.
         """
-        if len(set(states)) < 2 or len(set(states)) != len(states):
+        if isinstance(states, str) or len(set(states)) != len(states):
+            raise ValueError("states must be a sequence of distinct names")
+        if len(states) < 2:
             raise ValueError("states must be at least two distinct names")
         if max_per_state < 1:
             raise ValueError("max_per_state must be at least 1")
-        self.backend = backend
-        self.roi = roi
-        self.states = tuple(states)
-        self.max_per_state = max_per_state
-        self.frame_side = frame_side
+        if frame_side < 1:
+            raise ValueError("frame_side must be positive")
+        self._backend = backend
+        self._roi = roi
+        self._states = tuple(states)
+        self._max_per_state = max_per_state
+        self._frame_side = frame_side
         self._k = k
         self._classifier = Classifier.for_backend(backend, k=k)
         self._lock = threading.Lock()
@@ -82,9 +105,34 @@ class StateDetector:
         self._labels: dict[str, str] = {}
 
     @property
+    def backend(self) -> FeatureBackend:
+        """Return the feature backend."""
+        return self._backend
+
+    @property
     def backend_id(self) -> str:
         """Return the id of the backend in use."""
-        return self.backend.id
+        return self._backend.id
+
+    @property
+    def roi(self) -> Roi:
+        """Return the region."""
+        return self._roi
+
+    @property
+    def states(self) -> tuple[str, ...]:
+        """Return the declared states."""
+        return self._states
+
+    @property
+    def max_per_state(self) -> int:
+        """Return the reference cap per state."""
+        return self._max_per_state
+
+    @property
+    def frame_side(self) -> int:
+        """Return the longer side frames are normalized to."""
+        return self._frame_side
 
     @property
     def ready(self) -> bool:
@@ -94,7 +142,7 @@ class StateDetector:
     def missing_states(self) -> list[str]:
         """Return the states without any reference, in declared order."""
         counts = self.counts()
-        return [state for state in self.states if not counts.get(state)]
+        return [state for state in self._states if not counts.get(state)]
 
     def counts(self) -> dict[str, int]:
         """Return the number of references per state."""
@@ -111,107 +159,137 @@ class StateDetector:
         Raises ImageError for undecodable data and BlankRegionError when the
         region shows nothing to compare.
         """
-        image = load_image(data, max_side=self.frame_side)
-        return Prepared(encode_jpeg(image), self._checked_features(image))
+        original = encode_jpeg(load_image(data, max_side=self._frame_side))
+        # Extract from what is stored, so a reload gives the same features.
+        stored = load_image(original, max_side=self._frame_side)
+        return Prepared(
+            original, self._checked_features(stored), self._roi, self._frame_side
+        )
 
-    def add(self, key: str, state: str, prepared: Prepared) -> list[str]:
+    def add(self, key: str, prepared: Prepared, *, state: str) -> list[str]:
         """
-        Add a reference; return the keys evicted to stay within the cap.
+        Add or replace a reference; return the keys evicted to stay in the cap.
 
-        The new key itself can be evicted when it adds nothing new.
+        When the cap is exceeded the most redundant reference goes; between
+        two equal ones the older is dropped, so the newest stays.
         """
         self._check_state(state)
+        if prepared.roi != self._roi or prepared.frame_side != self._frame_side:
+            raise ValueError("prepared for another region or frame size")
         with self._lock:
             self._classifier.add(key, prepared.features, state=state)
+            # Re-insert so a replaced key counts as the newest.
+            self._forget([key])
             self._vectors[key] = prepared.features.vector
             self._labels[key] = state
-            return self._evict(state)
+            evicted = self._select_evictions()
+            if evicted:
+                self._classifier.remove_many(evicted)
+                self._forget(evicted)
+            return evicted
 
-    def load(self, items: Iterable[tuple[str, str, bytes]]) -> LoadReport:
+    def load(self, items: Iterable[tuple[str, bytes, str]]) -> LoadReport:
         """
-        Replace all references with stored ``(key, state, original)`` items.
+        Replace all references with stored ``(key, original, state)`` items.
 
         Unusable items are skipped and reported instead of failing the load.
+        For a repeated key the last item wins.
         """
-        prepared: list[tuple[str, Features, str]] = []
-        skipped: dict[str, str] = {}
-        for key, state, data in items:
-            if state not in self.states:
-                skipped[key] = "unknown_state"
-                continue
-            try:
-                features = self._checked_features(
-                    load_image(data, max_side=self.frame_side)
-                )
-            except ImageError:
-                skipped[key] = "undecodable"
-            except BlankRegionError:
-                skipped[key] = "blank"
-            else:
-                prepared.append((key, features, state))
-        classifier = Classifier(
-            self.backend.id, margin=self._classifier.margin, k=self._k
-        )
-        classifier.add_many(prepared)
+        latest = {key: (data, state) for key, data, state in items}
         with self._lock:
-            # Swap in one step, so a concurrent classify never sees it empty.
+            features_by_key: dict[str, Features] = {}
+            labels: dict[str, str] = {}
+            skipped: dict[str, SkipReason] = {}
+            for key, (data, state) in latest.items():
+                if state not in self._states:
+                    skipped[key] = SkipReason.UNKNOWN_STATE
+                    continue
+                try:
+                    image = load_image(data, max_side=self._frame_side)
+                    features = self._checked_features(image)
+                except ImageError:
+                    skipped[key] = SkipReason.UNDECODABLE
+                except BlankRegionError:
+                    skipped[key] = SkipReason.BLANK
+                except TarsiusError:
+                    skipped[key] = SkipReason.UNUSABLE
+                else:
+                    features_by_key[key] = features
+                    labels[key] = state
+            self._labels = labels
+            self._vectors = {key: f.vector for key, f in features_by_key.items()}
+            evicted = self._select_evictions()
+            self._forget(evicted)
+            classifier = Classifier(
+                self._backend.id, margin=self._classifier.margin, k=self._k
+            )
+            classifier.add_many(
+                (key, features_by_key[key], state)
+                for key, state in self._labels.items()
+            )
             self._classifier = classifier
-            self._vectors = {key: features.vector for key, features, _ in prepared}
-            self._labels = {key: state for key, _, state in prepared}
-            evicted = [key for state in self.states for key in self._evict(state)]
-        return LoadReport(len(prepared) - len(evicted), skipped, evicted)
+            return LoadReport(len(self._labels), skipped, evicted)
 
-    def remove(self, keys: Iterable[str]) -> None:
-        """Remove references; unknown keys are ignored."""
+    def remove(self, keys: str | Iterable[str]) -> None:
+        """Remove one or more references; unknown keys are ignored."""
+        keys = [keys] if isinstance(keys, str) else list(keys)
         with self._lock:
-            for key in keys:
-                self._drop(key)
+            self._classifier.remove_many(keys)
+            self._forget(keys)
 
     def classify(self, data: bytes) -> Result:
-        """Classify a frame; not ready until every state has a reference."""
-        if not self.ready:
-            return Result(Status.NOT_READY)
-        image = load_image(data, max_side=self.frame_side)
-        return self._classifier.classify(
-            extract_features(self.backend, image, self.roi)
-        )
+        """
+        Classify a frame; not ready until every state has a reference.
 
-    def most_redundant(self, state: str) -> str | None:
-        """Return the reference most similar to another one of ``state``."""
-        with self._lock:
-            return self._most_redundant(state)
+        Raises ImageError for undecodable data and BlankRegionError for a
+        frame whose region shows nothing, e.g. from an offline camera.
+        """
+        classifier = self._classifier
+        if len(classifier.counts()) < len(self._states):
+            return Result(Status.NOT_READY)
+        image = load_image(data, max_side=self._frame_side)
+        result = classifier.classify(self._checked_features(image))
+        # A reference may have been removed since the check above.
+        if len(result.scores) < len(self._states):
+            return Result(Status.NOT_READY)
+        return result
 
     def _checked_features(self, image: Image.Image) -> Features:
-        features = extract_features(self.backend, image, self.roi)
+        region = self._roi.crop(image)
+        if ImageStat.Stat(region.convert("L")).stddev[0] < BLANK_STDDEV:
+            raise BlankRegionError("the region has no structure to compare")
+        features = extract_features(self._backend, image, self._roi)
         if not features.has_structure:
             raise BlankRegionError("the region has no structure to compare")
         return features
 
     def _check_state(self, state: str) -> None:
-        if state not in self.states:
-            raise ValueError(f"unknown state {state!r}, expected one of {self.states}")
+        if state not in self._states:
+            raise ValueError(f"unknown state {state!r}, expected one of {self._states}")
 
-    def _evict(self, state: str) -> list[str]:
-        evicted = []
-        while sum(1 for label in self._labels.values() if label == state) > (
-            self.max_per_state
-        ):
-            key = self._most_redundant(state)
-            assert key is not None
-            self._drop(key)
-            evicted.append(key)
+    def _forget(self, keys: Iterable[str]) -> None:
+        for key in keys:
+            self._vectors.pop(key, None)
+            self._labels.pop(key, None)
+
+    def _select_evictions(self) -> list[str]:
+        """Pick the most redundant references until every state fits the cap."""
+        evicted: list[str] = []
+        for state in self._states:
+            keys = [key for key, label in self._labels.items() if label == state]
+            excess = len(keys) - self._max_per_state
+            if excess <= 0:
+                continue
+            vectors = np.stack([self._vectors[key] for key in keys])
+            similarity = vectors @ vectors.T
+            np.fill_diagonal(similarity, -np.inf)
+            alive = np.ones(len(keys), dtype=bool)
+            for _ in range(excess):
+                closest = np.where(alive, similarity.max(axis=1), -np.inf)
+                # Keys are oldest first and argmax takes the first of equals.
+                drop = int(np.argmax(closest))
+                alive[drop] = False
+                similarity[:, drop] = -np.inf
+                similarity[drop, :] = -np.inf
+                evicted.append(keys[drop])
         return evicted
-
-    def _drop(self, key: str) -> None:
-        self._classifier.remove(key)
-        self._vectors.pop(key, None)
-        self._labels.pop(key, None)
-
-    def _most_redundant(self, state: str) -> str | None:
-        keys = [key for key, label in self._labels.items() if label == state]
-        if len(keys) < 2:
-            return None
-        vectors = np.stack([self._vectors[key] for key in keys])
-        similarity = vectors @ vectors.T
-        np.fill_diagonal(similarity, -np.inf)
-        return keys[int(similarity.max(axis=1).argmax())]

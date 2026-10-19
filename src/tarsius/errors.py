@@ -28,7 +28,19 @@ class BlankRegionError(TarsiusError, ValueError):
 class RoiError(TarsiusError, ValueError):
     """A region is empty or reaches outside the frame."""
 
-    def __init__(self, axis: Literal["horizontal", "vertical"], message: str) -> None:
+    def __init__(
+        self, message: str, *, axis: Literal["horizontal", "vertical"]
+    ) -> None:
         """Remember which axis is wrong, so a UI can point at it."""
         super().__init__(message)
         self.axis = axis
+
+    def __reduce__(self) -> tuple[object, ...]:
+        """Keep the axis when copied or pickled."""
+        return (_rebuild_roi_error, (str(self), self.axis))
+
+
+def _rebuild_roi_error(
+    message: str, axis: Literal["horizontal", "vertical"]
+) -> RoiError:
+    return RoiError(message, axis=axis)

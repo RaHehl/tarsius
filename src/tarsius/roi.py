@@ -23,11 +23,11 @@ class Roi:
         """Reject empty or out-of-frame rectangles."""
         if not (0.0 <= self.left < self.right <= 1.0):
             raise RoiError(
-                "horizontal", f"invalid horizontal range {self.left}..{self.right}"
+                f"invalid horizontal range {self.left}..{self.right}", axis="horizontal"
             )
         if not (0.0 <= self.top < self.bottom <= 1.0):
             raise RoiError(
-                "vertical", f"invalid vertical range {self.top}..{self.bottom}"
+                f"invalid vertical range {self.top}..{self.bottom}", axis="vertical"
             )
 
     @classmethod
@@ -58,8 +58,9 @@ class Roi:
         return astuple(self)
 
     def as_percent(self) -> tuple[float, float, float, float]:
-        """Return ``(left, top, right, bottom)`` in percent."""
-        return (self.left * 100, self.top * 100, self.right * 100, self.bottom * 100)
+        """Return ``(left, top, right, bottom)`` in percent, without float noise."""
+        left, top, right, bottom = (round(value * 100, 6) for value in astuple(self))
+        return left, top, right, bottom
 
     def box(self, size: tuple[int, int]) -> tuple[int, int, int, int]:
         """Return the pixel box for an image size, at least one pixel each way."""

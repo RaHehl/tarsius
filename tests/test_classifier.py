@@ -315,3 +315,24 @@ def test_add_many_rejects_mixed_lengths() -> None:
             [("a", _features(1, 0, 0, 0), "on"), ("b", _features(1, 0, 0), "off")]
         )
     assert len(classifier) == 0
+
+
+def test_add_many_is_atomic(make_scene) -> None:
+    """A blank item in a batch leaves the classifier unchanged."""
+    backend = EdgeBackend()
+    classifier = Classifier.for_backend(backend)
+    good = extract_features(backend, make_scene(car=True, seed=0))
+    blank = Features(backend.id, np.zeros_like(good.vector), np.zeros_like(good.query))
+    with pytest.raises(BlankRegionError):
+        classifier.add_many([("a", good, "on"), ("b", blank, "off")])
+    assert len(classifier) == 0
+
+
+def test_remove_many() -> None:
+    classifier = _toy()
+    classifier.add_many(
+        [(key, _features(1, i, 0, 0), "on") for i, key in enumerate("abc")]
+    )
+    classifier.remove_many(["a", "c", "missing"])
+    classifier.remove_many([])
+    assert classifier.references() == {"b": "on"}

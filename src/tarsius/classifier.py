@@ -21,7 +21,7 @@ class Status(StrEnum):
     CONFIDENT = "confident"
     # The best state does not beat the runner-up by the margin: ask the user.
     UNSURE = "unsure"
-    # Fewer than two states have references: nothing to compare yet.
+    # Not every state has a reference yet: nothing to compare.
     NOT_READY = "not_ready"
 
 
@@ -105,6 +105,13 @@ class Classifier:
             for key, state, vector in checked:
                 self._refs[key] = (state, vector)
             self._index = self._build()
+
+    def remove_many(self, keys: Iterable[str]) -> None:
+        """Drop several references with one rebuild; unknown keys are ignored."""
+        with self._lock:
+            removed = [key for key in keys if self._refs.pop(key, None) is not None]
+            if removed:
+                self._index = self._build()
 
     def remove(self, key: str) -> None:
         """Drop the reference ``key`` if present."""

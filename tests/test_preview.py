@@ -2,7 +2,8 @@ from __future__ import annotations
 
 from PIL import Image
 
-from tarsius import Roi, encode_jpeg, load_image, outline
+from tarsius import Roi, load_image, outline
+from tarsius.image import encode_jpeg
 
 MAGENTA = (255, 0, 255)
 

@@ -92,5 +92,5 @@ ignore = ["D203", "D212", "PLR2004", "S101"]
 max-args = 7
 
 [tool.ruff.lint.per-file-ignores]
-"tests/**" = ["D", "PLR0913", "S311"]
+"tests/**" = ["D", "PLR0913", "S301", "S311"]
 "scripts/**" = ["D", "T201", "S"]

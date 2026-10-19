@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import copy
+import pickle
 from io import BytesIO
 
 import pytest
 from PIL import Image
 
-from tarsius import FULL_FRAME, ImageError, Roi, RoiError, encode_jpeg, load_image
+from tarsius import FULL_FRAME, ImageError, Roi, RoiError, load_image
+from tarsius.image import encode_jpeg
 
 
 def _jpeg(size: tuple[int, int]) -> bytes:
@@ -100,7 +103,7 @@ def test_roi_error_axis(bounds: tuple[float, float, float, float], axis: str) ->
 def test_percent_roundtrip() -> None:
     roi = Roi.from_percent(12.5, 10, 56, 45.5)
     assert roi.as_tuple() == pytest.approx((0.125, 0.1, 0.56, 0.455))
-    assert roi.as_percent() == pytest.approx((12.5, 10, 56, 45.5))
+    assert Roi.from_percent(7, 14, 29, 57).as_percent() == (7, 14, 29, 57)
 
 
 def test_box_matches_crop() -> None:
@@ -113,3 +116,16 @@ def test_box_matches_crop() -> None:
 def test_encode_jpeg_roundtrip() -> None:
     image = Image.new("RGB", (40, 30), (200, 10, 10))
     assert load_image(encode_jpeg(image)).size == (40, 30)
+
+
+def test_roi_error_survives_copy() -> None:
+    with pytest.raises(RoiError) as err:
+        Roi(0.5, 0, 0.4, 1)
+    for clone in (copy.copy(err.value), pickle.loads(pickle.dumps(err.value))):
+        assert clone.axis == "horizontal"
+        assert str(clone) == str(err.value)
+
+
+def test_encode_jpeg_accepts_alpha() -> None:
+    image = Image.new("RGBA", (10, 10), (1, 2, 3, 128))
+    assert load_image(encode_jpeg(image)).mode == "RGB"

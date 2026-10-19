@@ -18,14 +18,14 @@ Local, training-free state detection for a region of a camera image: is the car 
 You confirm a few frames per state, tarsius compares new frames against them and answers with a state or "unsure". Nothing leaves the machine and nothing gets trained.
 
 ```python
-from tarsius import EdgeBackend, Roi, StateDetector, Status
+from tarsius import EdgeBackend, Roi, StateDetector
 
 detector = StateDetector(EdgeBackend(), Roi.from_percent(10, 10, 60, 50), ("on", "off"))
 
 # Teaching: check the frame, store prepared.original, add it.
 prepared = detector.prepare(car_jpeg)
-evicted = detector.add("ref-1", "on", prepared)  # keys dropped to stay within the cap
-detector.add("ref-2", "off", detector.prepare(empty_jpeg))
+evicted = detector.add("ref-1", prepared, state="on")  # keys dropped by the cap
+detector.add("ref-2", detector.prepare(empty_jpeg), state="off")
 
 result = detector.classify(new_jpeg)
 result.status  # Status.CONFIDENT, Status.UNSURE or Status.NOT_READY
@@ -33,9 +33,9 @@ result.state  # "on" or "off" when confident
 result.candidate  # best guess, also when unsure
 ```
 
-After a restart, hand the stored originals back with `detector.load([(key, state, original), ...])`. References are always re-extracted with the current region and backend, and unusable ones (blank, undecodable, unknown state) are skipped and reported instead of failing. `tarsius.outline(frame, roi)` draws the region on a frame, using the same pixel box as the comparison.
+After a restart, hand the stored originals back with `detector.load([(key, original, state), ...])`. References are always re-extracted with the current region and backend; unusable ones (blank, undecodable, unknown state) are skipped and reported in the returned `LoadReport` instead of failing. `prepare()` and `classify()` raise `ImageError` for undecodable data and `BlankRegionError` when the region shows nothing, for example a grey frame from an offline camera. `tarsius.outline(frame, roi)` draws the region on a frame with the same box rule as the comparison.
 
-All methods block; call them in an executor. They are safe to call from several threads.
+All methods block; call them in an executor. They are safe to call from several threads: changes are serialized and `classify()` never waits for them.
 
 ## Backends
 
