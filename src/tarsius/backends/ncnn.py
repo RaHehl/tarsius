@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import threading
 from importlib.resources import as_file, files
 
 import ncnn
@@ -27,7 +28,9 @@ class NcnnBackend:
 
     Loading costs about 10 MB, the first extraction another 10 MB of ncnn
     buffers. The backend keeps no state between calls, so one instance can
-    serve every detector in a process, also from several threads.
+    serve every detector in a process, also from several threads. ncnn keeps
+    buffers for every inference that ran at the same time, so inferences
+    take turns; the GIL is released while they run.
     """
 
     # Bump with any change to the model, ncnn options or preprocessing.
@@ -35,7 +38,8 @@ class NcnnBackend:
     default_margin = 0.02
 
     def __init__(self, *, threads: int = 1) -> None:
-        """Load the bundled model; blocking file I/O."""
+        """Load the bundled model; blocking file I/O, raises BackendError."""
+        self._lock = threading.Lock()
         self._net = ncnn.Net()
         opt = self._net.opt
         opt.num_threads = threads
@@ -65,12 +69,13 @@ class NcnnBackend:
         bgr = np.ascontiguousarray(np.asarray(resized)[..., ::-1])
         mat = ncnn.Mat.from_pixels(bgr, ncnn.Mat.PixelType.PIXEL_BGR, _INPUT, _INPUT)
         mat.substract_mean_normalize(_MEAN, [])
-        extractor = self._net.create_extractor()
-        extractor.input("data", mat)
-        ret, out = extractor.extract(_BLOB)
-        if ret:  # pragma: no cover - ncnn reports no recoverable cause
-            raise BackendError(f"ncnn extraction failed with {ret}")
-        maps = np.array(out, dtype=np.float32)
+        with self._lock:
+            extractor = self._net.create_extractor()
+            extractor.input("data", mat)
+            ret, out = extractor.extract(_BLOB)
+            if ret:  # pragma: no cover - ncnn reports no recoverable cause
+                raise BackendError(f"ncnn extraction failed with {ret}")
+            maps = np.array(out, dtype=np.float32)
         embedding = maps.reshape(maps.shape[0], -1).mean(axis=1)
         norm = float(np.linalg.norm(embedding))
         vector = embedding / norm if norm > 0 else embedding

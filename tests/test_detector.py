@@ -21,6 +21,7 @@ from tarsius import (
     Status,
     load_image,
 )
+from tarsius import detector as detector_module
 from tarsius.image import encode_jpeg
 
 SPOT = Roi(0.28, 0.22, 0.72, 0.88)
@@ -548,3 +549,33 @@ def test_blank_errors_tell_frame_from_region(make_scene) -> None:
     with pytest.raises(BlankRegionError) as err:
         detector.prepare(plain)
     assert not isinstance(err.value, BlankFrameError)
+
+
+@pytest.fixture
+def shared_backends(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Give the test its own process-wide backend cache."""
+    monkeypatch.setattr(detector_module, "_SHARED", detector_module._SharedBackends())
+
+
+@pytest.mark.usefixtures("shared_backends")
+def test_default_backend_is_shared_and_retried(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed load is not kept, the next detector loads it and shares it."""
+    loads = []
+
+    def factory() -> EdgeBackend:
+        loads.append(1)
+        if len(loads) == 1:
+            raise BackendError("model missing")
+        return EdgeBackend()
+
+    monkeypatch.setattr(detector_module, "_STATE_BACKEND", factory)
+    with pytest.raises(BackendError):
+        StateDetector(SPOT, ("on", "off"))
+
+    first = StateDetector(SPOT, ("on", "off"))
+    second = StateDetector(SPOT, ("a", "b"))
+
+    assert first.backend is second.backend
+    assert len(loads) == 2

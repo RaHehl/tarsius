@@ -15,6 +15,7 @@ from tarsius import (
     Status,
     extract_features,
 )
+from tarsius import detector as detector_module
 from tarsius.backends import ncnn as ncnn_module
 
 CAR_SPOT = Roi(0.28, 0.22, 0.72, 0.88)
@@ -85,8 +86,11 @@ def test_classify_with_rough_region(
 
 
 @pytest.mark.usefixtures("backend")
-def test_state_detector_shares_its_default_backend() -> None:
+def test_state_detector_shares_its_default_backend(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Without a backend, state detectors use ncnn, loaded once."""
+    monkeypatch.setattr(detector_module, "_SHARED", detector_module._SharedBackends())
     first = StateDetector(CAR_SPOT, ("on", "off"))
     second = StateDetector(Roi(0, 0, 1, 1), ("a", "b", "c"))
 

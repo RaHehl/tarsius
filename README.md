@@ -44,14 +44,14 @@ result.candidate  # best guess, also when unsure
 
 After a restart, hand the stored originals back with `detector.load([(key, original, state), ...])`. References are always re-extracted with the current region and backend; unusable ones (blank, undecodable, unknown state) are skipped and reported in the returned `LoadReport` instead of failing. `prepare()` and `classify()` raise `ImageError` for undecodable data and `BlankFrameError` when the frame shows nothing, for example a grey frame from an offline camera. `prepare()` also raises `BlankRegionError` (the base class) when the region has nothing to compare, `classify()` answers such a region as unsure, without a candidate. `tarsius.outline(frame, roi)` draws the region on a frame with the same box rule as the comparison.
 
-All methods block; call them in an executor. They are safe to call from several threads: changes are serialized and `classify()` never waits for them.
+All methods block, and so does creating the first detector, which loads the model; call them in an executor. They are safe to call from several threads: changes are serialized and `classify()` never waits for them.
 
 ## Backends
 
 - `NcnnBackend`: SqueezeNet 1.1 ImageNet features on [ncnn](https://github.com/Tencent/ncnn). Tolerates clutter and lighting changes, a rough region is enough.
 - `EdgeBackend`: numpy only, a baseline. Needs a tight region that still shows some static structure when the object is gone.
 
-`NcnnBackend` is the default choice and ncnn is a regular dependency. Share one instance per process, each one holds about 20 MB. Since ncnn 1.0.20261020, `opencv-python` is an optional extra of ncnn, so tarsius installs on Alpine (musl) systems such as Home Assistant OS. Checked in `python:3.14-alpine` on x86_64 and aarch64. Both backends support Python 3.14 and 3.15.
+`StateDetector` uses `NcnnBackend` unless you pass `backend=`. It loads one instance per process (about 20 MB) and shares it, inferences take turns on it. ncnn is a regular dependency. Since ncnn 1.0.20261020, `opencv-python` is an optional extra of ncnn, so tarsius installs on Alpine (musl) systems such as Home Assistant OS. Checked in `python:3.14-alpine` on x86_64 and aarch64. Both backends support Python 3.14 and 3.15.
 
 ## Results so far
 
