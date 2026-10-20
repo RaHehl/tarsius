@@ -1,9 +1,12 @@
 """
-Fit a backend's temperature on recorded history and report how well it fits.
+Fit a backend's temperature on recorded history and check it on newer frames.
 
-Uses the same data and split as history_split.py: references from older
-segments (1, 2 and 5 per state, several seeds), scores of the newest frames.
-The temperature minimizes the negative log likelihood of the true states.
+Same data as history_split.py. The temperature is fitted on the frames between
+TARSIUS_FIT_SPLIT and TARSIUS_SPLIT, with references from before the first,
+and checked on the frames after TARSIUS_SPLIT with references from before it.
+References are 1, 2 and 5 segments per state over several seeds, so a frame
+counts once per budget and seed. The fit minimizes the negative log likelihood
+of the true states.
 Usage: calibrate.py <camera> [<camera> ...]
 """
 
@@ -12,74 +15,72 @@ import functools
 import json
 import os
 import pathlib
-import random
 import sys
 
 import numpy as np
-from history_split import DATA, SEEDS, SPLIT, load
+from history_split import DATA, SEEDS, SPLIT, load, teach
 
 from tarsius import BlankRegionError, EdgeBackend, NcnnBackend, Roi, StateDetector
 
+FIT_SPLIT = os.environ.get("TARSIUS_FIT_SPLIT", "20261003")
 BUDGETS = (1, 2, 5)
+CANDIDATES = np.geomspace(1e-4, 1, 400)
 
 
-def collect(rows, prepared, make_detector):
-    """Return (scores, truth) of the newest frames for every budget and seed."""
-    scores, truth = [], []
+def collect(rows, prepared, make_detector, *, before, until=None):
+    """Return (scores, truth) of the frames from `before` to `until`."""
+    samples = []
     for budget in BUDGETS:
         for seed in range(SEEDS):
-            older = {}
-            for index, name, state, _ in rows:
-                if name < SPLIT:
-                    older.setdefault(state, set()).add(index)
-            rng = random.Random(seed)
-            chosen = set()
-            for ids in older.values():
-                chosen |= set(rng.sample(sorted(ids), min(budget, len(ids))))
-            detector = make_detector()
-            for index, name, state, _ in rows:
-                if index in chosen and name in prepared:
-                    detector.add(name, prepared[name], state=state)
+            detector = teach(rows, prepared, make_detector, budget, seed, before=before)
+            if not detector.ready:
+                continue
             for _, name, state, data in rows:
-                if name < SPLIT:
+                if name < before or (until is not None and name >= until):
                     continue
                 try:
                     result = detector.classify(data)
                 except BlankRegionError:
                     continue
                 states = sorted(result.scores)
-                scores.append([result.scores[s] for s in states])
-                truth.append(states.index(state))
-    return np.array(scores), np.array(truth)
+                samples.append(
+                    (np.array([result.scores[s] for s in states]), states.index(state))
+                )
+    return samples
 
 
-def softmax(scores, temperature):
-    z = scores / temperature
-    z -= z.max(axis=1, keepdims=True)
-    weights = np.exp(z)
-    return weights / weights.sum(axis=1, keepdims=True)
+def probabilities(scores, temperature):
+    weights = np.exp((scores - scores.max()) / temperature)
+    return weights / weights.sum()
 
 
-def fit(scores, truth):
-    """Return the temperature with the lowest negative log likelihood."""
-    rows = np.arange(len(truth))
-    candidates = np.geomspace(1e-4, 1, 400)
-    losses = [
-        -np.mean(np.log(softmax(scores, t)[rows, truth] + 1e-12)) for t in candidates
-    ]
-    return float(candidates[int(np.argmin(losses))])
+def nll(samples, temperature):
+    return -np.mean(
+        [np.log(probabilities(s, temperature)[t] + 1e-12) for s, t in samples]
+    )
 
 
-def calibration_error(probabilities, truth, bins=10):
-    """Expected calibration error over equal-width confidence bins."""
-    confidence = probabilities.max(axis=1)
-    correct = probabilities.argmax(axis=1) == truth
+def fit(samples):
+    """Return the temperature with the lowest NLL, None at the edge of the grid."""
+    best = int(np.argmin([nll(samples, t) for t in CANDIDATES]))
+    return None if best in (0, len(CANDIDATES) - 1) else float(CANDIDATES[best])
+
+
+def report(samples, temperature):
+    """Return calibration error, share at 0.9 or more and accuracy there."""
+    confidence, correct = [], []
+    for scores, truth in samples:
+        p = probabilities(scores, temperature)
+        confidence.append(p.max())
+        correct.append(p.argmax() == truth)
+    confidence, correct = np.array(confidence), np.array(correct)
     error = 0.0
-    for low in np.linspace(0, 1, bins, endpoint=False):
-        mask = (confidence > low) & (confidence <= low + 1 / bins)
+    for low in np.linspace(0, 1, 10, endpoint=False):
+        mask = (confidence > low) & (confidence <= low + 0.1)
         if mask.any():
             error += mask.mean() * abs(correct[mask].mean() - confidence[mask].mean())
-    return error
+    high = confidence >= 0.9
+    return error, high.mean(), correct[high].mean() if high.any() else float("nan")
 
 
 def main():
@@ -87,7 +88,7 @@ def main():
     rois = json.loads(pathlib.Path(rois_file).read_text())
     for name, factory in {"edges": EdgeBackend, "ncnn": NcnnBackend}.items():
         backend = factory()
-        all_scores, all_truth = [], []
+        fitting, checking = [], []
         for camera in sys.argv[1:]:
             rows = load(camera)
             states = sorted({state for _, _, state, _ in rows})
@@ -99,21 +100,20 @@ def main():
             for _, frame, _, data in rows:
                 with contextlib.suppress(BlankRegionError):
                     prepared[frame] = preparer.prepare(data)
-            scores, truth = collect(rows, prepared, make_detector)
-            all_scores.append(scores)
-            all_truth.append(truth)
-        scores = np.concatenate(all_scores)
-        truth = np.concatenate(all_truth)
-        temperature = fit(scores, truth)
-        probabilities = softmax(scores, temperature)
-        correct = probabilities.argmax(axis=1) == truth
-        high = probabilities.max(axis=1) >= 0.9
+            fitting += collect(
+                rows, prepared, make_detector, before=FIT_SPLIT, until=SPLIT
+            )
+            checking += collect(rows, prepared, make_detector, before=SPLIT)
+        temperature = fit(fitting) if fitting else None
+        if temperature is None:
+            print(f"{name}: no temperature, the fit frames hold no usable errors")
+            continue
+        error, high, right = report(checking, temperature)
         print(
             f"{name}: temperature {temperature:.3f} (backend uses"
-            f" {backend.temperature}), {len(truth)} frames,"
-            f" calibration error {calibration_error(probabilities, truth):.3f},"
-            f" {high.mean() * 100:.1f} % at 0.9 or more, of which"
-            f" {correct[high].mean() * 100:.1f} % right",
+            f" {backend.temperature}) from {len(fitting)} samples, checked on"
+            f" {len(checking)}: calibration error {error:.3f}, {high * 100:.1f} %"
+            f" at 0.9 or more, {right * 100:.2f} % of those right",
             flush=True,
         )
 
