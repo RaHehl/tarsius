@@ -19,8 +19,9 @@ def majority(results: Sequence[Result], *, min_share: float = 0.5) -> Result:
 
     ``scores`` hold the confident share of every state seen in the results,
     ``candidate`` is the state most frames leaned to, confident or not, ties
-    going to the earliest frame, and ``margin`` is the confident share of the
-    reported state or candidate.
+    going to the earliest frame, ``margin`` is the confident share of the
+    reported state or candidate, and ``probabilities`` are the mean of the
+    frames' probabilities.
     """
     if not 0.5 <= min_share < 1:
         raise ValueError("min_share must be in [0.5, 1)")
@@ -31,10 +32,18 @@ def majority(results: Sequence[Result], *, min_share: float = 0.5) -> Result:
     votes = Counter(result.state for result in results if result.state is not None)
     for state, count in votes.items():
         shares[state] = count / len(results)
+    probabilities = _mean_probabilities(results)
     if votes:
         best, count = votes.most_common(1)[0]
         if count / len(results) > min_share:
-            return Result(Status.CONFIDENT, best, best, shares[best], shares)
+            return Result(
+                Status.CONFIDENT,
+                best,
+                best,
+                shares[best],
+                shares,
+                probabilities=probabilities,
+            )
     leanings = Counter(
         result.state or result.candidate
         for result in results
@@ -42,4 +51,17 @@ def majority(results: Sequence[Result], *, min_share: float = 0.5) -> Result:
     )
     candidate = leanings.most_common(1)[0][0] if leanings else None
     margin = shares.get(candidate, 0.0) if candidate is not None else 0.0
-    return Result(Status.UNSURE, None, candidate, margin, shares)
+    return Result(
+        Status.UNSURE, None, candidate, margin, shares, probabilities=probabilities
+    )
+
+
+def _mean_probabilities(results: Sequence[Result]) -> dict[str, float]:
+    with_probabilities = [result for result in results if result.probabilities]
+    totals = {
+        state: 0.0 for result in with_probabilities for state in result.probabilities
+    }
+    for result in with_probabilities:
+        for state, probability in result.probabilities.items():
+            totals[state] += probability / len(with_probabilities)
+    return totals

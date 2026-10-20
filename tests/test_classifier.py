@@ -29,7 +29,7 @@ def _features(*values: float, backend_id: str = "test/1") -> Features:
 
 
 def _toy(margin: float = 0.05, k: int = 3) -> Classifier:
-    return Classifier("test/1", margin=margin, k=k)
+    return Classifier("test/1", margin=margin, temperature=0.05, k=k)
 
 
 def _trained(make_scene, backend: EdgeBackend, roi: Roi = CAR_SPOT) -> Classifier:
@@ -101,6 +101,7 @@ def test_edges_use_gradients_not_brightness(make_scene) -> None:
 def test_not_ready_until_two_states() -> None:
     classifier = _toy()
     assert classifier.classify(_features(1, 0, 0, 0)) == Result(Status.NOT_READY)
+    assert not Result(Status.NOT_READY).probabilities
     assert not classifier.ready
 
     classifier.add("a", _features(1, 0, 0, 0), state="occupied")
@@ -123,6 +124,40 @@ def test_unsure_keeps_candidate() -> None:
     assert result.candidate == "occupied"
     assert 0 < result.margin < 0.2
     assert result.nearest == {"occupied": "a", "free": "b"}
+
+
+def test_probabilities_follow_scores() -> None:
+    classifier = _toy(margin=0.2)
+    classifier.add("a", _features(1, 0, 0, 0), state="occupied")
+    classifier.add("b", _features(0, 1, 0, 0), state="free")
+
+    result = classifier.classify(_features(1, 0.9, 0, 0))
+
+    assert sum(result.probabilities.values()) == pytest.approx(1.0)
+    assert result.probabilities["occupied"] > result.probabilities["free"]
+    # A margin of m gives 1 / (1 + exp(-m / temperature)) for two states.
+    expected = 1 / (1 + np.exp(-result.margin / classifier.temperature))
+    assert result.probabilities["occupied"] == pytest.approx(expected)
+
+
+@pytest.mark.parametrize(
+    ("temperature", "low", "high"), [(0.01, 0.99, 1.0), (1.0, 0.5, 0.65)]
+)
+def test_temperature_sets_confidence(
+    temperature: float, low: float, high: float
+) -> None:
+    classifier = Classifier("test/1", margin=0.05, temperature=temperature)
+    classifier.add("a", _features(1, 0, 0, 0), state="occupied")
+    classifier.add("b", _features(0, 1, 0, 0), state="free")
+
+    result = classifier.classify(_features(1, 0.5, 0, 0))
+
+    assert low <= result.probabilities["occupied"] <= high
+
+
+def test_backends_bring_a_temperature() -> None:
+    classifier = Classifier.for_backend(EdgeBackend())
+    assert classifier.temperature == EdgeBackend.temperature
 
 
 def test_margin_is_inclusive() -> None:
@@ -244,10 +279,13 @@ def test_rejects_blank_reference(make_scene) -> None:
         classifier.add("blank", extract_features(backend, blank), state="free")
 
 
-@pytest.mark.parametrize(("margin", "k"), [(0.0, 3), (-0.1, 3), (0.02, 0)])
-def test_rejects_bad_settings(margin: float, k: int) -> None:
+@pytest.mark.parametrize(
+    ("margin", "temperature", "k"),
+    [(0.0, 0.05, 3), (-0.1, 0.05, 3), (0.02, 0.05, 0), (0.02, 0.0, 3)],
+)
+def test_rejects_bad_settings(margin: float, temperature: float, k: int) -> None:
     with pytest.raises(ValueError):
-        Classifier("test/1", margin=margin, k=k)
+        Classifier("test/1", margin=margin, temperature=temperature, k=k)
 
 
 def _vote(state: str | None, candidate: str | None = None) -> Result:
@@ -324,6 +362,22 @@ def test_majority(
 ) -> None:
     result = majority(results)
     assert (result.status, result.state, result.candidate) == (status, state, candidate)
+
+
+def test_majority_averages_probabilities() -> None:
+    sure = Result(Status.CONFIDENT, "a", "a", 0.5, probabilities={"a": 0.9, "b": 0.1})
+    unsure = Result(Status.UNSURE, None, "a", 0.0, probabilities={"a": 0.5, "b": 0.5})
+
+    for status, results in (
+        (Status.CONFIDENT, [sure, sure, unsure]),
+        (Status.UNSURE, [sure, unsure, unsure, Result(Status.NOT_READY)]),
+    ):
+        result = majority(results)
+        assert result.status is status
+        expected = sum(r.probabilities.get("a", 0) for r in results if r.probabilities)
+        expected /= sum(1 for r in results if r.probabilities)
+        assert result.probabilities["a"] == pytest.approx(expected)
+        assert sum(result.probabilities.values()) == pytest.approx(1.0)
 
 
 def test_majority_reports_shares() -> None:

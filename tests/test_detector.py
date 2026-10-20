@@ -368,6 +368,7 @@ class _StubBackend:
 
     id = "edges/1"
     default_margin = 0.02
+    temperature = 0.037
 
     def __init__(self, fail_width: int, error: Exception | None) -> None:
         self._edges = EdgeBackend()
@@ -524,6 +525,7 @@ def test_classify_region_without_structure_is_unsure(make_scene) -> None:
     assert result.status is Status.UNSURE
     assert result.candidate is None
     assert result.scores == {"on": 0.0, "off": 0.0}
+    assert result.probabilities == {"on": 0.5, "off": 0.5}
 
 
 def test_dark_frame_with_structure_is_not_blank(make_scene) -> None:

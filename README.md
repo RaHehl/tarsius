@@ -40,7 +40,10 @@ result = detector.classify(new_jpeg)
 result.status  # Status.CONFIDENT, Status.UNSURE or Status.NOT_READY
 result.state  # "on" or "off" when confident
 result.candidate  # best guess, also when unsure
+result.probabilities  # {"on": 0.97, "off": 0.03}, estimated from the scores
 ```
+
+`probabilities` is a softmax of the per-state scores, scaled by a temperature per backend that `scripts/calibrate.py` fits on recorded history. On the history below, ncnn gives 0.9 or more to 98 % of the test frames and all of those are right, with a calibration error of 0.007. A blank region gets the same probability for every state, a detector that is not ready gives none.
 
 After a restart, hand the stored originals back with `detector.load([(key, original, state), ...])`. References are always re-extracted with the current region and backend; unusable ones (blank, undecodable, unknown state) are skipped and reported in the returned `LoadReport` instead of failing. `prepare()` and `classify()` raise `ImageError` for undecodable data and `BlankFrameError` when the frame shows nothing, for example a grey frame from an offline camera. `prepare()` also raises `BlankRegionError` (the base class) when the region has nothing to compare, `classify()` answers such a region as unsure, without a candidate. `tarsius.outline(frame, roi)` draws the region on a frame with the same box rule as the comparison.
 
