@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import threading
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from enum import StrEnum
 
 import numpy as np
 from PIL import Image, ImageStat
 
+from .backends.ncnn import NcnnBackend
 from .classifier import Classifier, Result, Status
 from .errors import BlankFrameError, BlankRegionError, ImageError
 from .features import FeatureBackend, Features, Vector, extract_features
@@ -54,27 +55,53 @@ class LoadReport:
     evicted: tuple[str, ...] = ()
 
 
+class _SharedBackends:
+    """
+    Backends loaded once per process and shared by every task using them.
+
+    Loading holds the lock, so loads of different backends wait for each
+    other. Do not fork while another thread uses a shared backend.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._backends: dict[Callable[[], FeatureBackend], FeatureBackend] = {}
+
+    def get(self, factory: Callable[[], FeatureBackend]) -> FeatureBackend:
+        """Return the shared backend, loading it first; a failure is not kept."""
+        with self._lock:
+            if (backend := self._backends.get(factory)) is None:
+                backend = self._backends[factory] = factory()
+            return backend
+
+
+_SHARED = _SharedBackends()
+# The backend StateDetector uses unless one is passed.
+_STATE_BACKEND: Callable[[], FeatureBackend] = NcnnBackend
+
+
 class StateDetector:
     """
     The state of one region, learned from confirmed frames.
 
-    Owns the region, the backend and the references. Callers store the
-    ``original`` of each prepared frame and hand it back to :meth:`load`, so
-    references are always re-extracted with the current region and backend.
-    Originals are stored at ``frame_side``; raising it later means teaching
-    again. The settings are fixed; build a new detector to change them.
+    Owns the region and the references, and uses a backend shared per process.
+    Callers store the ``original`` of each prepared frame and hand it back to
+    :meth:`load`, so references are always re-extracted with the current region
+    and backend. Originals are stored at ``frame_side``; raising it later means
+    teaching again. The settings are fixed; build a new detector to change them.
 
     All methods block; call them in an executor. They are safe to call from
     several threads: changes are serialized, :meth:`classify` reads an
-    immutable snapshot and never waits for them.
+    immutable snapshot and never waits for them. Only inferences on the
+    shared backend take turns.
     """
 
     def __init__(
         self,
-        backend: FeatureBackend,
         roi: Roi,
         states: Sequence[str],
         *,
+        backend: FeatureBackend | None = None,
         max_per_state: int = MAX_PER_STATE,
         k: int = 3,
         frame_side: int = FRAME_SIDE,
@@ -82,8 +109,13 @@ class StateDetector:
         """
         Create a detector for the given states, without references.
 
-        ``frame_side`` bounds the longer side frames are normalized to; small
-        details in a small region need more.
+        The detector picks its backend for this task, shared by all detectors of
+        the process that don't pass one. The first one loads the model, so this
+        can block and raise BackendError. ``backend_id`` tells which backend it
+        is, and a stored original is simply re-extracted when it changes. Pass
+        ``backend`` only to override it, e.g. in tests. ``frame_side`` bounds
+        the longer side frames are normalized to; small details in a small
+        region need more.
         """
         if isinstance(states, str):
             raise ValueError("states must be a sequence of distinct names")
@@ -96,6 +128,8 @@ class StateDetector:
             raise ValueError("max_per_state must be at least 1")
         if frame_side < 1:
             raise ValueError("frame_side must be positive")
+        if backend is None:
+            backend = _SHARED.get(_STATE_BACKEND)
         self._backend = backend
         self._roi = roi
         self._states = tuple(states)

@@ -26,9 +26,10 @@ You confirm a few frames per state, tarsius compares new frames against them and
 Tarsiers are small nocturnal primates whose eyes are each about as large as their brain. Lots of eye, little brain, and very good at seeing in the dark. That is the idea here too: no training and no model to learn, just careful looking, including at IR night frames.
 
 ```python
-from tarsius import EdgeBackend, Roi, StateDetector
+from tarsius import Roi, StateDetector
 
-detector = StateDetector(EdgeBackend(), Roi.from_percent(10, 10, 60, 50), ("on", "off"))
+# The detector picks the backend for the task; detector.backend_id tells which.
+detector = StateDetector(Roi.from_percent(10, 10, 60, 50), ("on", "off"))
 
 # Teaching: check the frame, store prepared.original, add it.
 prepared = detector.prepare(car_jpeg)
@@ -43,14 +44,14 @@ result.candidate  # best guess, also when unsure
 
 After a restart, hand the stored originals back with `detector.load([(key, original, state), ...])`. References are always re-extracted with the current region and backend; unusable ones (blank, undecodable, unknown state) are skipped and reported in the returned `LoadReport` instead of failing. `prepare()` and `classify()` raise `ImageError` for undecodable data and `BlankFrameError` when the frame shows nothing, for example a grey frame from an offline camera. `prepare()` also raises `BlankRegionError` (the base class) when the region has nothing to compare, `classify()` answers such a region as unsure, without a candidate. `tarsius.outline(frame, roi)` draws the region on a frame with the same box rule as the comparison.
 
-All methods block; call them in an executor. They are safe to call from several threads: changes are serialized and `classify()` never waits for them.
+All methods block, and so does creating the first detector, which loads the model; call them in an executor. They are safe to call from several threads: changes are serialized and `classify()` never waits for them, only inferences on the shared backend take turns.
 
 ## Backends
 
-- `NcnnBackend`: SqueezeNet 1.1 ImageNet features on [ncnn](https://github.com/Tencent/ncnn), install with `tarsius[ncnn]`. Tolerates clutter and lighting changes, a rough region is enough.
+- `NcnnBackend`: SqueezeNet 1.1 ImageNet features on [ncnn](https://github.com/Tencent/ncnn). Tolerates clutter and lighting changes, a rough region is enough.
 - `EdgeBackend`: numpy only, a baseline. Needs a tight region that still shows some static structure when the object is gone.
 
-`NcnnBackend` is the intended default. It stays an optional extra until ncnn ships a release that no longer requires `opencv-python`, which has no musllinux wheels. Without that, tarsius cannot install on Alpine (musl) systems such as Home Assistant OS, whose Core container is Alpine based. ncnn master already made opencv optional ([Tencent/ncnn@0ca5a4b](https://github.com/Tencent/ncnn/commit/0ca5a4b6d)), so the next ncnn release should unblock it. ncnn has no wheels for Python 3.15 yet, and building it from the source package fails, so the `ncnn` extra needs Python 3.14 until the next ncnn release. The rest of tarsius supports 3.14 and 3.15.
+`StateDetector` uses `NcnnBackend` unless you pass `backend=`. It loads one instance per process (about 20 MB) and shares it, inferences take turns on it. ncnn is a regular dependency. Since ncnn 1.0.20261020, `opencv-python` is an optional extra of ncnn, so tarsius installs on Alpine (musl) systems such as Home Assistant OS. Checked in `python:3.14-alpine` on x86_64 and aarch64. Both backends support Python 3.14 and 3.15.
 
 ## Results so far
 
@@ -73,7 +74,7 @@ A small sample, not a guarantee. `scripts/history_split.py` runs the same evalua
 
 ```sh
 scripts/build_model.sh   # once, builds the ncnn model into src/tarsius/models
-uv sync --extra ncnn
+uv sync
 uv run pytest
 uvx prek run --all-files
 ```

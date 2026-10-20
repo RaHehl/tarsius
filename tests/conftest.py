@@ -8,6 +8,8 @@ import numpy as np
 import pytest
 from PIL import Image, ImageDraw
 
+from tarsius import detector as detector_module
+
 SIZE = (320, 180)
 
 
@@ -59,3 +61,9 @@ def scene(
 @pytest.fixture
 def make_scene():
     return scene
+
+
+@pytest.fixture(autouse=True)
+def shared_backends(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Give every test its own process-wide backend cache."""
+    monkeypatch.setattr(detector_module, "_SHARED", detector_module._SharedBackends())
