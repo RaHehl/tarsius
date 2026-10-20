@@ -611,10 +611,24 @@ def test_load_uses_caches_instead_of_extracting(make_scene) -> None:
 
     report = detector.load(items, caches=caches)
 
-    assert backend.calls == 0
-    assert report == LoadReport(2)
+    # One extraction checks that the cached vectors fit the backend.
+    assert backend.calls == 1
+    assert report.loaded == 2
+    assert not report.caches
     frame = _frame(make_scene, car=True, seed=1)
     assert detector.classify(frame) == _detector_loaded(items).classify(frame)
+
+
+def test_load_takes_caches_as_memoryview(make_scene) -> None:
+    items, caches = _prepared_items(_detector(), make_scene)
+    backend = _CountingBackend()
+
+    report = _counting_detector(backend).load(
+        items, caches={key: memoryview(blob) for key, blob in caches.items()}
+    )
+
+    assert backend.calls == 1
+    assert not report.caches
 
 
 def _detector_loaded(items) -> StateDetector:
@@ -629,7 +643,7 @@ def test_load_reports_caches_that_spare_the_next_load(make_scene) -> None:
     backend = _CountingBackend()
 
     assert _counting_detector(backend).load(items, caches=report.caches).loaded == 2
-    assert backend.calls == 0
+    assert backend.calls == 1
 
 
 @pytest.mark.parametrize(
@@ -638,8 +652,9 @@ def test_load_reports_caches_that_spare_the_next_load(make_scene) -> None:
         ("edges/2", SPOT, 1024),
         ("edges/1", Roi(0.2, 0.2, 0.8, 0.9), 1024),
         ("edges/1", SPOT, 640),
+        ("edges/1", Roi(SPOT.left, SPOT.top, SPOT.right, 0.9), 1024),
     ],
-    ids=["backend", "roi", "frame_side"],
+    ids=["backend", "roi", "frame_side", "roi_bottom"],
 )
 def test_load_ignores_caches_for_other_settings(
     make_scene, backend_id: str, roi: Roi, frame_side: int
@@ -655,11 +670,14 @@ def test_load_ignores_caches_for_other_settings(
     assert report.caches["car"] != caches["car"]
 
 
+@pytest.mark.parametrize("package", ["tarsius", "pillow", "ncnn"])
 def test_load_ignores_caches_from_another_release(
-    make_scene, monkeypatch: pytest.MonkeyPatch
+    make_scene, monkeypatch: pytest.MonkeyPatch, package: str
 ) -> None:
     items, caches = _prepared_items(_detector(), make_scene)
-    monkeypatch.setattr(cache_module, "_TARSIUS", "99.0.0")
+    monkeypatch.setattr(
+        cache_module, "_VERSIONS", cache_module._VERSIONS | {package: "99.0.0"}
+    )
     backend = _CountingBackend()
 
     report = _counting_detector(backend).load(items, caches=caches)
@@ -693,7 +711,14 @@ def _rewrite(blob: bytes, **changes) -> bytes:
         lambda blob, other: blob + b"\0\0\0\0",
         lambda blob, other: b"x" + blob[1:],
         lambda blob, other: _rewrite(blob, vector=0),
-        lambda blob, other: _rewrite(blob, query=[1, 3]),
+        lambda blob, other: _rewrite(blob, vector="5"),
+        lambda blob, other: _rewrite(blob, format=99),
+        lambda blob, other: _scaled(blob, 100.0),
+        lambda blob, other: _scaled(blob, np.inf),
+        lambda blob, other: _scaled(blob, np.nan),
+        lambda blob, other: (
+            cache_module.MAGIC + struct.pack("<I", 200_000) + b"[" * 200_000
+        ),
         lambda blob, other: cache_module.MAGIC + b"\x04\0\0\0null",
         lambda blob, other: cache_module.MAGIC + b"\xff\0\0\0{",
     ],
@@ -704,7 +729,12 @@ def _rewrite(blob: bytes, **changes) -> bytes:
         "trailing",
         "magic",
         "length",
-        "shape",
+        "length_type",
+        "format",
+        "scaled",
+        "infinite",
+        "nan",
+        "deep_header",
         "not_a_dict",
         "broken_header",
     ],
@@ -719,6 +749,52 @@ def test_load_extracts_again_for_unusable_caches(make_scene, damage) -> None:
 
     assert backend.calls == 2
     assert report.caches["car"] == caches["car"]
+
+
+def _scaled(blob: bytes, factor: float) -> bytes:
+    """Multiply the cached vector, keeping the header and length."""
+    start = len(cache_module.MAGIC)
+    (size,) = struct.unpack_from("<I", blob, start)
+    body = start + 4 + size
+    vector = np.frombuffer(blob, "<f4", offset=body) * np.float32(factor)
+    return blob[:body] + vector.astype("<f4").tobytes()
+
+
+def _short(blob: bytes, original: bytes) -> bytes:
+    """Return a well-formed cache of a unit vector with the wrong length."""
+    features = Features("edges/1", np.full(5, 0.2**0.5, np.float32), np.ones((1, 5)))
+    return cache_module.dump(features, original, SPOT, 1024)
+
+
+@pytest.mark.parametrize(
+    ("damaged", "calls"),
+    [
+        # The fresh extraction of the other item shows the length.
+        pytest.param({"car"}, 1 + 2, id="one"),
+        # One extraction to learn the length, then all again.
+        pytest.param({"car", "empty"}, 1 + 2, id="all"),
+    ],
+)
+def test_load_extracts_again_for_caches_of_another_length(
+    make_scene, damaged: set[str], calls: int
+) -> None:
+    items, caches = _prepared_items(_detector(), make_scene)
+    originals = {key: data for key, data, _ in items}
+    caches |= {key: _short(caches[key], originals[key]) for key in damaged}
+    if damaged == {"car"}:
+        del caches["empty"]
+    backend = _CountingBackend()
+    detector = _counting_detector(backend)
+
+    report = detector.load(items, caches=caches)
+
+    assert backend.calls == calls
+    assert report.loaded == 2
+    assert set(report.caches) == {"car", "empty"}
+    detector.add(
+        "more", detector.prepare(_frame(make_scene, car=True, seed=2)), state="on"
+    )
+    assert detector.classify(_frame(make_scene, car=True, seed=3)).state == "on"
 
 
 def test_load_ignores_a_cache_of_a_blank_region(make_scene) -> None:

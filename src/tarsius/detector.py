@@ -43,8 +43,11 @@ class Prepared:
     features: Features
     roi: Roi
     frame_side: int
-    # Features of the original, to store next to it and pass to load().
-    cache: bytes
+
+    @property
+    def cache(self) -> bytes:
+        """Return the features of the original, to store next to it for load()."""
+        return cache.dump(self.features, self.original, self.roi, self.frame_side)
 
 
 @dataclass(frozen=True, slots=True)
@@ -56,7 +59,9 @@ class LoadReport:
     skipped: Mapping[str, SkipReason] = field(default_factory=dict)
     # Keys dropped to stay within the per-state cap.
     evicted: tuple[str, ...] = ()
-    # Key -> new cache for items extracted without a usable one; store them.
+    # Key -> new cache for items extracted without a usable one. Only these
+    # are listed: store them, keep the caches of the others and drop those
+    # of skipped and evicted keys.
     caches: Mapping[str, bytes] = field(default_factory=dict)
 
 
@@ -207,13 +212,7 @@ class StateDetector:
         # Extract from what is stored, so a reload gives the same features.
         stored = load_image(original, max_side=self._frame_side)
         features = self._checked_features(stored)
-        return Prepared(
-            original,
-            features,
-            self._roi,
-            self._frame_side,
-            cache.dump(features, original, self._roi, self._frame_side),
-        )
+        return Prepared(original, features, self._roi, self._frame_side)
 
     def add(self, key: str, prepared: Prepared, *, state: str) -> list[str]:
         """
@@ -231,7 +230,7 @@ class StateDetector:
             self._forget([key])
             self._vectors[key] = prepared.features.vector
             self._labels[key] = state
-            evicted = self._select_evictions()
+            evicted = self._select_evictions(self._labels, self._vectors)
             if evicted:
                 self._classifier.remove_many(evicted)
                 self._forget(evicted)
@@ -255,50 +254,76 @@ class StateDetector:
         another tarsius release is ignored, and the report holds a new one.
         """
         latest = {key: (data, state) for key, data, state in items}
-        caches = caches or {}
         with self._lock:
-            features_by_key: dict[str, Features] = {}
-            labels: dict[str, str] = {}
-            skipped: dict[str, SkipReason] = {}
-            fresh: dict[str, bytes] = {}
-            for key, (data, state) in latest.items():
-                if state not in self._states:
-                    skipped[key] = SkipReason.UNKNOWN_STATE
-                    continue
-                if (blob := caches.get(key)) is not None and (
-                    features := cache.restore(
-                        blob, data, self._backend.id, self._roi, self._frame_side
-                    )
-                ):
-                    features_by_key[key] = features
-                    labels[key] = state
-                    continue
-                try:
-                    image = load_image(data, max_side=self._frame_side)
-                    features = self._checked_features(image)
-                except ImageError:
-                    skipped[key] = SkipReason.UNDECODABLE
-                except BlankRegionError:
-                    skipped[key] = SkipReason.BLANK
-                else:
-                    features_by_key[key] = features
-                    labels[key] = state
-                    fresh[key] = cache.dump(features, data, self._roi, self._frame_side)
-            self._labels = labels
-            self._vectors = {key: f.vector for key, f in features_by_key.items()}
-            evicted = self._select_evictions()
-            self._forget(evicted)
+            features, labels, skipped, fresh = self._load_features(latest, caches or {})
+            if features and not self._fits_backend(features, latest, fresh):
+                # A cache of another length slipped through, extract them all.
+                features, labels, skipped, fresh = self._load_features(latest, {})
+            vectors = {key: f.vector for key, f in features.items()}
+            evicted = self._select_evictions(labels, vectors)
+            for key in evicted:
+                del labels[key], vectors[key]
+                fresh.pop(key, None)
             classifier = Classifier(
                 self._backend.id, margin=self._classifier.margin, k=self._k
             )
             classifier.add_many(
-                (key, features_by_key[key], state)
-                for key, state in self._labels.items()
+                (key, features[key], state) for key, state in labels.items()
             )
-            self._classifier = classifier
-            for key in evicted:
-                fresh.pop(key, None)
-            return LoadReport(len(self._labels), skipped, tuple(evicted), fresh)
+            # Nothing changes until every step above succeeded.
+            self._labels, self._vectors, self._classifier = labels, vectors, classifier
+            return LoadReport(len(labels), skipped, tuple(evicted), fresh)
+
+    def _load_features(
+        self, latest: Mapping[str, tuple[bytes, str]], caches: Mapping[str, bytes]
+    ) -> tuple[
+        dict[str, Features], dict[str, str], dict[str, SkipReason], dict[str, bytes]
+    ]:
+        """Restore or extract the features of each item."""
+        features_by_key: dict[str, Features] = {}
+        labels: dict[str, str] = {}
+        skipped: dict[str, SkipReason] = {}
+        fresh: dict[str, bytes] = {}
+        for key, (data, state) in latest.items():
+            if state not in self._states:
+                skipped[key] = SkipReason.UNKNOWN_STATE
+                continue
+            if (blob := caches.get(key)) is not None and (
+                restored := cache.restore(
+                    blob, data, self._backend.id, self._roi, self._frame_side
+                )
+            ):
+                features_by_key[key] = restored
+                labels[key] = state
+                continue
+            try:
+                image = load_image(data, max_side=self._frame_side)
+                extracted = self._checked_features(image)
+            except ImageError:
+                skipped[key] = SkipReason.UNDECODABLE
+            except BlankRegionError:
+                skipped[key] = SkipReason.BLANK
+            else:
+                features_by_key[key] = extracted
+                labels[key] = state
+                fresh[key] = cache.dump(extracted, data, self._roi, self._frame_side)
+        return features_by_key, labels, skipped, fresh
+
+    def _fits_backend(
+        self,
+        features: Mapping[str, Features],
+        latest: Mapping[str, tuple[bytes, str]],
+        fresh: Mapping[str, bytes],
+    ) -> bool:
+        """Check that every vector has the length the backend gives now."""
+        if fresh:
+            length = features[next(iter(fresh))].vector.size
+        else:
+            # All came from caches: extract one to learn the current length.
+            key = next(iter(features))
+            image = load_image(latest[key][0], max_side=self._frame_side)
+            length = self._checked_features(image).vector.size
+        return all(f.vector.size == length for f in features.values())
 
     def remove(self, keys: str | Iterable[str]) -> None:
         """Remove one or more references; unknown keys are ignored."""
@@ -351,16 +376,18 @@ class StateDetector:
             self._vectors.pop(key, None)
             self._labels.pop(key, None)
 
-    def _select_evictions(self) -> list[str]:
+    def _select_evictions(
+        self, labels: Mapping[str, str], vectors: Mapping[str, Vector]
+    ) -> list[str]:
         """Pick the most redundant references until every state fits the cap."""
         evicted: list[str] = []
         for state in self._states:
-            keys = [key for key, label in self._labels.items() if label == state]
+            keys = [key for key, label in labels.items() if label == state]
             excess = len(keys) - self._max_per_state
             if excess <= 0:
                 continue
-            vectors = np.stack([self._vectors[key] for key in keys])
-            similarity = vectors @ vectors.T
+            stacked = np.stack([vectors[key] for key in keys])
+            similarity = stacked @ stacked.T
             np.fill_diagonal(similarity, -np.inf)
             alive = np.ones(len(keys), dtype=bool)
             for _ in range(excess):
