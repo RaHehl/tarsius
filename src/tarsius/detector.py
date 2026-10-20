@@ -10,6 +10,7 @@ from enum import StrEnum
 import numpy as np
 from PIL import Image, ImageStat
 
+from . import cache
 from .backends.ncnn import NcnnBackend
 from .classifier import Classifier, Result, Status
 from .errors import BlankFrameError, BlankRegionError, ImageError
@@ -42,6 +43,8 @@ class Prepared:
     features: Features
     roi: Roi
     frame_side: int
+    # Features of the original, to store next to it and pass to load().
+    cache: bytes
 
 
 @dataclass(frozen=True, slots=True)
@@ -53,6 +56,8 @@ class LoadReport:
     skipped: Mapping[str, SkipReason] = field(default_factory=dict)
     # Keys dropped to stay within the per-state cap.
     evicted: tuple[str, ...] = ()
+    # Key -> new cache for items extracted without a usable one; store them.
+    caches: Mapping[str, bytes] = field(default_factory=dict)
 
 
 class _SharedBackends:
@@ -86,9 +91,10 @@ class StateDetector:
 
     Owns the region and the references, and uses a backend shared per process.
     Callers store the ``original`` of each prepared frame and hand it back to
-    :meth:`load`, so references are always re-extracted with the current region
-    and backend. Originals are stored at ``frame_side``; raising it later means
-    teaching again. The settings are fixed; build a new detector to change them.
+    :meth:`load`, so references follow the current region and backend. Storing
+    the ``cache`` too spares the extraction on load while nothing changed.
+    Originals are stored at ``frame_side``; raising it later means teaching
+    again. The settings are fixed; build a new detector to change them.
 
     All methods block; call them in an executor. They are safe to call from
     several threads: changes are serialized, :meth:`classify` reads an
@@ -200,8 +206,13 @@ class StateDetector:
         original = encode_jpeg(load_image(data, max_side=self._frame_side))
         # Extract from what is stored, so a reload gives the same features.
         stored = load_image(original, max_side=self._frame_side)
+        features = self._checked_features(stored)
         return Prepared(
-            original, self._checked_features(stored), self._roi, self._frame_side
+            original,
+            features,
+            self._roi,
+            self._frame_side,
+            cache.dump(features, original, self._roi, self._frame_side),
         )
 
     def add(self, key: str, prepared: Prepared, *, state: str) -> list[str]:
@@ -226,22 +237,41 @@ class StateDetector:
                 self._forget(evicted)
             return evicted
 
-    def load(self, items: Iterable[tuple[str, bytes, str]]) -> LoadReport:
+    def load(
+        self,
+        items: Iterable[tuple[str, bytes, str]],
+        *,
+        caches: Mapping[str, bytes] | None = None,
+    ) -> LoadReport:
         """
         Replace all references with stored ``(key, original, state)`` items.
 
         Everything not in ``items`` is dropped. Unusable items are skipped and
         reported instead of failing the load; for a repeated key the last item
         wins. A backend failure raises and leaves the references unchanged.
+
+        ``caches`` maps keys to the ``cache`` of their prepared frame or of an
+        earlier report. A cache made for other settings, another backend or
+        another tarsius release is ignored, and the report holds a new one.
         """
         latest = {key: (data, state) for key, data, state in items}
+        caches = caches or {}
         with self._lock:
             features_by_key: dict[str, Features] = {}
             labels: dict[str, str] = {}
             skipped: dict[str, SkipReason] = {}
+            fresh: dict[str, bytes] = {}
             for key, (data, state) in latest.items():
                 if state not in self._states:
                     skipped[key] = SkipReason.UNKNOWN_STATE
+                    continue
+                if (blob := caches.get(key)) is not None and (
+                    features := cache.restore(
+                        blob, data, self._backend.id, self._roi, self._frame_side
+                    )
+                ):
+                    features_by_key[key] = features
+                    labels[key] = state
                     continue
                 try:
                     image = load_image(data, max_side=self._frame_side)
@@ -253,6 +283,7 @@ class StateDetector:
                 else:
                     features_by_key[key] = features
                     labels[key] = state
+                    fresh[key] = cache.dump(features, data, self._roi, self._frame_side)
             self._labels = labels
             self._vectors = {key: f.vector for key, f in features_by_key.items()}
             evicted = self._select_evictions()
@@ -265,7 +296,9 @@ class StateDetector:
                 for key, state in self._labels.items()
             )
             self._classifier = classifier
-            return LoadReport(len(self._labels), skipped, tuple(evicted))
+            for key in evicted:
+                fresh.pop(key, None)
+            return LoadReport(len(self._labels), skipped, tuple(evicted), fresh)
 
     def remove(self, keys: str | Iterable[str]) -> None:
         """Remove one or more references; unknown keys are ignored."""

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+import struct
 import threading
 
 import numpy as np
@@ -12,6 +14,7 @@ from tarsius import (
     BlankFrameError,
     BlankRegionError,
     EdgeBackend,
+    Features,
     ImageError,
     LoadReport,
     Result,
@@ -21,6 +24,7 @@ from tarsius import (
     Status,
     load_image,
 )
+from tarsius import cache as cache_module
 from tarsius import detector as detector_module
 from tarsius.image import encode_jpeg
 
@@ -213,7 +217,9 @@ def test_load_skips_unusable_references(make_scene) -> None:
             "gone": SkipReason.UNKNOWN_STATE,
         },
         (),
+        report.caches,
     )
+    assert set(report.caches) == {"car", "empty"}
     assert detector.references() == {"car": "on", "empty": "off"}
 
 
@@ -238,7 +244,7 @@ def test_load_last_duplicate_wins(make_scene) -> None:
             ("b", _frame(make_scene, car=False, seed=0), "off"),
         ]
     )
-    assert report == LoadReport(2, {}, ())
+    assert report == LoadReport(2, {}, (), report.caches)
     assert detector.references() == {"a": "on", "b": "off"}
 
 
@@ -572,3 +578,174 @@ def test_default_backend_is_shared_and_retried(
 
     assert first.backend is second.backend
     assert len(loads) == 2
+
+
+class _CountingBackend(EdgeBackend):
+    def __init__(self, backend_id: str = "edges/1") -> None:
+        super().__init__()
+        self.id = backend_id
+        self.calls = 0
+
+    def extract(self, image: Image.Image):
+        self.calls += 1
+        return super().extract(image)
+
+
+def _counting_detector(
+    backend: _CountingBackend, roi: Roi = SPOT, **kwargs
+) -> StateDetector:
+    return StateDetector(roi, ("on", "off"), backend=backend, **kwargs)
+
+
+def _prepared_items(detector: StateDetector, make_scene):
+    car = detector.prepare(_frame(make_scene, car=True, seed=0))
+    empty = detector.prepare(_frame(make_scene, car=False, seed=0))
+    items = [("car", car.original, "on"), ("empty", empty.original, "off")]
+    return items, {"car": car.cache, "empty": empty.cache}
+
+
+def test_load_uses_caches_instead_of_extracting(make_scene) -> None:
+    items, caches = _prepared_items(_detector(), make_scene)
+    backend = _CountingBackend()
+    detector = _counting_detector(backend)
+
+    report = detector.load(items, caches=caches)
+
+    assert backend.calls == 0
+    assert report == LoadReport(2)
+    frame = _frame(make_scene, car=True, seed=1)
+    assert detector.classify(frame) == _detector_loaded(items).classify(frame)
+
+
+def _detector_loaded(items) -> StateDetector:
+    detector = _detector()
+    detector.load(items)
+    return detector
+
+
+def test_load_reports_caches_that_spare_the_next_load(make_scene) -> None:
+    items, _ = _prepared_items(_detector(), make_scene)
+    report = _detector().load(items)
+    backend = _CountingBackend()
+
+    assert _counting_detector(backend).load(items, caches=report.caches).loaded == 2
+    assert backend.calls == 0
+
+
+@pytest.mark.parametrize(
+    ("backend_id", "roi", "frame_side"),
+    [
+        ("edges/2", SPOT, 1024),
+        ("edges/1", Roi(0.2, 0.2, 0.8, 0.9), 1024),
+        ("edges/1", SPOT, 640),
+    ],
+    ids=["backend", "roi", "frame_side"],
+)
+def test_load_ignores_caches_for_other_settings(
+    make_scene, backend_id: str, roi: Roi, frame_side: int
+) -> None:
+    items, caches = _prepared_items(_detector(), make_scene)
+    backend = _CountingBackend(backend_id)
+    detector = _counting_detector(backend, roi, frame_side=frame_side)
+
+    report = detector.load(items, caches=caches)
+
+    assert backend.calls == 2
+    assert set(report.caches) == {"car", "empty"}
+    assert report.caches["car"] != caches["car"]
+
+
+def test_load_ignores_caches_from_another_release(
+    make_scene, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    items, caches = _prepared_items(_detector(), make_scene)
+    monkeypatch.setattr(cache_module, "_TARSIUS", "99.0.0")
+    backend = _CountingBackend()
+
+    report = _counting_detector(backend).load(items, caches=caches)
+
+    assert backend.calls == 2
+    assert set(report.caches) == {"car", "empty"}
+
+
+def _rewrite(blob: bytes, **changes) -> bytes:
+    """Change header fields of a cache and keep it well-formed otherwise."""
+    start = len(cache_module.MAGIC)
+    (size,) = struct.unpack_from("<I", blob, start)
+    header = json.loads(blob[start + 4 : start + 4 + size]) | changes
+    encoded = json.dumps(header).encode()
+    return b"".join(
+        (
+            cache_module.MAGIC,
+            struct.pack("<I", len(encoded)),
+            encoded,
+            blob[start + 4 + size :],
+        )
+    )
+
+
+@pytest.mark.parametrize(
+    "damage",
+    [
+        lambda blob, other: other,
+        lambda blob, other: b"",
+        lambda blob, other: blob[:-4],
+        lambda blob, other: blob + b"\0\0\0\0",
+        lambda blob, other: b"x" + blob[1:],
+        lambda blob, other: _rewrite(blob, vector=0),
+        lambda blob, other: _rewrite(blob, query=[1, 3]),
+        lambda blob, other: cache_module.MAGIC + b"\x04\0\0\0null",
+        lambda blob, other: cache_module.MAGIC + b"\xff\0\0\0{",
+    ],
+    ids=[
+        "other_original",
+        "empty",
+        "truncated",
+        "trailing",
+        "magic",
+        "length",
+        "shape",
+        "not_a_dict",
+        "broken_header",
+    ],
+)
+def test_load_extracts_again_for_unusable_caches(make_scene, damage) -> None:
+    items, caches = _prepared_items(_detector(), make_scene)
+    backend = _CountingBackend()
+
+    report = _counting_detector(backend).load(
+        items, caches={"car": damage(caches["car"], caches["empty"])}
+    )
+
+    assert backend.calls == 2
+    assert report.caches["car"] == caches["car"]
+
+
+def test_load_ignores_a_cache_of_a_blank_region(make_scene) -> None:
+    items, caches = _prepared_items(_detector(), make_scene)
+    features = cache_module.restore(caches["car"], items[0][1], "edges/1", SPOT, 1024)
+    assert features is not None
+    blank = cache_module.dump(
+        Features("edges/1", np.zeros_like(features.vector), features.query),
+        items[0][1],
+        SPOT,
+        1024,
+    )
+    backend = _CountingBackend()
+
+    _counting_detector(backend).load(items[:1], caches={"car": blank})
+
+    assert backend.calls == 1
+
+
+def test_load_reports_no_cache_for_evicted_keys(make_scene) -> None:
+    detector = _detector(max_per_state=1)
+    report = detector.load(
+        [
+            ("car0", _frame(make_scene, car=True, seed=0), "on"),
+            ("car1", _frame(make_scene, car=True, seed=1), "on"),
+            ("empty0", _frame(make_scene, car=False, seed=0), "off"),
+        ]
+    )
+    assert report.evicted
+    assert set(report.caches) == set(detector.references())

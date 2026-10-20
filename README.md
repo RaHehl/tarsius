@@ -31,7 +31,7 @@ from tarsius import Roi, StateDetector
 # The detector picks the backend for the task; detector.backend_id tells which.
 detector = StateDetector(Roi.from_percent(10, 10, 60, 50), ("on", "off"))
 
-# Teaching: check the frame, store prepared.original, add it.
+# Teaching: check the frame, store prepared.original and prepared.cache, add it.
 prepared = detector.prepare(car_jpeg)
 evicted = detector.add("ref-1", prepared, state="on")  # keys dropped by the cap
 detector.add("ref-2", detector.prepare(empty_jpeg), state="off")
@@ -42,7 +42,7 @@ result.state  # "on" or "off" when confident
 result.candidate  # best guess, also when unsure
 ```
 
-After a restart, hand the stored originals back with `detector.load([(key, original, state), ...])`. References are always re-extracted with the current region and backend; unusable ones (blank, undecodable, unknown state) are skipped and reported in the returned `LoadReport` instead of failing. `prepare()` and `classify()` raise `ImageError` for undecodable data and `BlankFrameError` when the frame shows nothing, for example a grey frame from an offline camera. `prepare()` also raises `BlankRegionError` (the base class) when the region has nothing to compare, `classify()` answers such a region as unsure, without a candidate. `tarsius.outline(frame, roi)` draws the region on a frame with the same box rule as the comparison.
+After a restart, hand the stored originals back with `detector.load([(key, original, state), ...], caches={key: cache, ...})`. A cache spares the extraction, about 14 ms per reference on an i5-8400T. One made for another region, backend or tarsius release is ignored, the reference is extracted again and `LoadReport.caches` holds the new cache to store. Unusable references (blank, undecodable, unknown state) are skipped and reported in the returned `LoadReport` instead of failing. `prepare()` and `classify()` raise `ImageError` for undecodable data and `BlankFrameError` when the frame shows nothing, for example a grey frame from an offline camera. `prepare()` also raises `BlankRegionError` (the base class) when the region has nothing to compare, `classify()` answers such a region as unsure, without a candidate. `tarsius.outline(frame, roi)` draws the region on a frame with the same box rule as the comparison.
 
 All methods block, and so does creating the first detector, which loads the model; call them in an executor. They are safe to call from several threads: changes are serialized and `classify()` never waits for them, only inferences on the shared backend take turns.
 
