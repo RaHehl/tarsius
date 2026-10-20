@@ -9,6 +9,7 @@ readme = "README.md"
 keywords = ["camera", "computer-vision", "home-assistant", "ncnn", "presence"]
 requires-python = ">=3.14"
 dependencies = [
+    "ncnn>=1.0.20261020",
     "numpy>=2.0",
     "pillow>=11.0",
 ]
@@ -23,9 +24,6 @@ classifiers = [
     "Topic :: Software Development :: Libraries",
     "Typing :: Typed",
 ]
-
-[project.optional-dependencies]
-ncnn = ["ncnn>=1.0.20260526"]
 
 [project.urls]
 "Repository" = "https://github.com/RaHehl/tarsius"

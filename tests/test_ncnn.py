@@ -16,10 +16,6 @@ from tarsius import (
 )
 from tarsius.backends import ncnn as ncnn_module
 
-if os.environ.get("TARSIUS_REQUIRE_NCNN") != "1":
-    # CI sets this where ncnn is installed: a silent skip would hide a missing model.
-    pytest.importorskip("ncnn")
-
 CAR_SPOT = Roi(0.28, 0.22, 0.72, 0.88)
 GOLDEN = Path(__file__).parent / "data" / "golden_squeezenet11.npy"
 

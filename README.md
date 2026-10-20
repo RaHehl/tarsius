@@ -47,10 +47,10 @@ All methods block; call them in an executor. They are safe to call from several 
 
 ## Backends
 
-- `NcnnBackend`: SqueezeNet 1.1 ImageNet features on [ncnn](https://github.com/Tencent/ncnn), install with `tarsius[ncnn]`. Tolerates clutter and lighting changes, a rough region is enough.
+- `NcnnBackend`: SqueezeNet 1.1 ImageNet features on [ncnn](https://github.com/Tencent/ncnn), Tolerates clutter and lighting changes, a rough region is enough.
 - `EdgeBackend`: numpy only, a baseline. Needs a tight region that still shows some static structure when the object is gone.
 
-`NcnnBackend` is the intended default. It stays an optional extra until ncnn ships a release that no longer requires `opencv-python`, which has no musllinux wheels. Without that, tarsius cannot install on Alpine (musl) systems such as Home Assistant OS, whose Core container is Alpine based. ncnn master already made opencv optional ([Tencent/ncnn@0ca5a4b](https://github.com/Tencent/ncnn/commit/0ca5a4b6d)), so the next ncnn release should unblock it. ncnn has no wheels for Python 3.15 yet, and building it from the source package fails, so the `ncnn` extra needs Python 3.14 until the next ncnn release. The rest of tarsius supports 3.14 and 3.15.
+`NcnnBackend` is the default choice and ncnn is a regular dependency. Since ncnn 1.0.20261020, `opencv-python` is an optional extra of ncnn, so tarsius installs on Alpine (musl) systems such as Home Assistant OS. Checked in `python:3.14-alpine` on x86_64 and aarch64. Both backends support Python 3.14 and 3.15.
 
 ## Results so far
 
@@ -73,7 +73,7 @@ A small sample, not a guarantee. `scripts/history_split.py` runs the same evalua
 
 ```sh
 scripts/build_model.sh   # once, builds the ncnn model into src/tarsius/models
-uv sync --extra ncnn
+uv sync
 uv run pytest
 uvx prek run --all-files
 ```

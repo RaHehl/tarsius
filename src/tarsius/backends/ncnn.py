@@ -30,11 +30,10 @@ class NcnnBackend:
     default_margin = 0.02
 
     def __init__(self, *, threads: int = 1) -> None:
-        """Load the bundled model; raises ImportError without the ``ncnn`` extra."""
-        try:
-            import ncnn  # noqa: PLC0415
-        except ImportError as err:  # pragma: no cover - depends on the environment
-            raise ImportError("NcnnBackend needs `pip install tarsius[ncnn]`") from err
+        """Load the bundled model."""
+        # Imported here so that only users of this backend pay for it.
+        import ncnn  # noqa: PLC0415
+
         self._ncnn = ncnn
         self._net = ncnn.Net()
         opt = self._net.opt
