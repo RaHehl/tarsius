@@ -25,7 +25,7 @@ def backend() -> NcnnBackend:
     try:
         return NcnnBackend()
     except BackendError:
-        if os.environ.get("TARSIUS_REQUIRE_NCNN") == "1":
+        if os.environ.get("TARSIUS_REQUIRE_MODEL") == "1":
             raise
         pytest.skip("SqueezeNet model not built, run scripts/build_model.sh")
 

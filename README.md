@@ -47,10 +47,10 @@ All methods block; call them in an executor. They are safe to call from several 
 
 ## Backends
 
-- `NcnnBackend`: SqueezeNet 1.1 ImageNet features on [ncnn](https://github.com/Tencent/ncnn), Tolerates clutter and lighting changes, a rough region is enough.
+- `NcnnBackend`: SqueezeNet 1.1 ImageNet features on [ncnn](https://github.com/Tencent/ncnn). Tolerates clutter and lighting changes, a rough region is enough.
 - `EdgeBackend`: numpy only, a baseline. Needs a tight region that still shows some static structure when the object is gone.
 
-`NcnnBackend` is the default choice and ncnn is a regular dependency. Since ncnn 1.0.20261020, `opencv-python` is an optional extra of ncnn, so tarsius installs on Alpine (musl) systems such as Home Assistant OS. Checked in `python:3.14-alpine` on x86_64 and aarch64. Both backends support Python 3.14 and 3.15.
+`NcnnBackend` is the default choice and ncnn is a regular dependency. Share one instance per process, each one holds about 20 MB. Since ncnn 1.0.20261020, `opencv-python` is an optional extra of ncnn, so tarsius installs on Alpine (musl) systems such as Home Assistant OS. Checked in `python:3.14-alpine` on x86_64 and aarch64. Both backends support Python 3.14 and 3.15.
 
 ## Results so far
 

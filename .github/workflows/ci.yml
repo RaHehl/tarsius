@@ -96,7 +96,7 @@ jobs:
       - run: uv run pytest --cov-report=xml
         env:
           # A silent skip would hide a model missing from the build.
-          TARSIUS_REQUIRE_NCNN: "1"
+          TARSIUS_REQUIRE_MODEL: "1"
       - uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
         if: matrix.coverage
         with:
