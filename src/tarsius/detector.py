@@ -92,7 +92,8 @@ class StateDetector:
 
     All methods block; call them in an executor. They are safe to call from
     several threads: changes are serialized, :meth:`classify` reads an
-    immutable snapshot and never waits for them.
+    immutable snapshot and never waits for them. Only inferences on the
+    shared backend take turns.
     """
 
     def __init__(

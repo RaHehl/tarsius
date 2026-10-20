@@ -63,7 +63,8 @@ def test_golden_embedding(make_scene, backend: NcnnBackend) -> None:
     regenerate the golden file.
     """
     vector, _ = backend.extract(make_scene(car=True, seed=0))
-    assert float(vector @ np.load(GOLDEN)) > 0.9999
+    # fp16 on ARM moves elements by about 1.4e-4, without it they stay within 3e-7.
+    np.testing.assert_allclose(vector, np.load(GOLDEN), atol=1e-5)
 
 
 @pytest.mark.parametrize("car", [True, False])
