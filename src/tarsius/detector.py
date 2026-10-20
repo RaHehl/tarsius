@@ -56,7 +56,12 @@ class LoadReport:
 
 
 class _SharedBackends:
-    """Backends loaded once per process and shared by every task using them."""
+    """
+    Backends loaded once per process and shared by every task using them.
+
+    Loading holds the lock, so loads of different backends wait for each
+    other. Do not fork while another thread uses a shared backend.
+    """
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
@@ -71,7 +76,7 @@ class _SharedBackends:
 
 
 _SHARED = _SharedBackends()
-# The backend each task uses unless the caller passes one.
+# The backend StateDetector uses unless one is passed.
 _STATE_BACKEND: Callable[[], FeatureBackend] = NcnnBackend
 
 
@@ -79,11 +84,11 @@ class StateDetector:
     """
     The state of one region, learned from confirmed frames.
 
-    Owns the region, the backend and the references. Callers store the
-    ``original`` of each prepared frame and hand it back to :meth:`load`, so
-    references are always re-extracted with the current region and backend.
-    Originals are stored at ``frame_side``; raising it later means teaching
-    again. The settings are fixed; build a new detector to change them.
+    Owns the region and the references, and uses a backend shared per process.
+    Callers store the ``original`` of each prepared frame and hand it back to
+    :meth:`load`, so references are always re-extracted with the current region
+    and backend. Originals are stored at ``frame_side``; raising it later means
+    teaching again. The settings are fixed; build a new detector to change them.
 
     All methods block; call them in an executor. They are safe to call from
     several threads: changes are serialized, :meth:`classify` reads an
@@ -103,10 +108,10 @@ class StateDetector:
         """
         Create a detector for the given states, without references.
 
-        The detector picks its backend for this task, shared by all detectors
-        of the process. The first one loads the model, so this can block and
-        raise BackendError. ``backend_id`` tells which backend it is, and a
-        stored original is simply re-extracted when it changes. Pass
+        The detector picks its backend for this task, shared by all detectors of
+        the process that don't pass one. The first one loads the model, so this
+        can block and raise BackendError. ``backend_id`` tells which backend it
+        is, and a stored original is simply re-extracted when it changes. Pass
         ``backend`` only to override it, e.g. in tests. ``frame_side`` bounds
         the longer side frames are normalized to; small details in a small
         region need more.

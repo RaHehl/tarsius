@@ -65,9 +65,9 @@ jobs:
           if-no-files-found: error
 
   pytest:
-    name: pytest (${{ matrix.python-version }})
+    name: pytest (${{ matrix.python-version }}${{ matrix.name-suffix }})
     needs: model
-    runs-on: ubuntu-24.04
+    runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
       # Codecov upload without a stored token.
@@ -77,8 +77,17 @@ jobs:
       matrix:
         include:
           - python-version: "3.14"
+            runner: ubuntu-24.04
+            name-suffix: ""
             coverage: true
           - python-version: "3.15"
+            runner: ubuntu-24.04
+            name-suffix: ""
+            coverage: false
+          # The golden features must hold on ARM too, where ncnn defaults to fp16.
+          - python-version: "3.14"
+            runner: ubuntu-24.04-arm
+            name-suffix: ", arm"
             coverage: false
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

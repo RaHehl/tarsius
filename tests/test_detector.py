@@ -551,13 +551,6 @@ def test_blank_errors_tell_frame_from_region(make_scene) -> None:
     assert not isinstance(err.value, BlankFrameError)
 
 
-@pytest.fixture
-def shared_backends(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Give the test its own process-wide backend cache."""
-    monkeypatch.setattr(detector_module, "_SHARED", detector_module._SharedBackends())
-
-
-@pytest.mark.usefixtures("shared_backends")
 def test_default_backend_is_shared_and_retried(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
