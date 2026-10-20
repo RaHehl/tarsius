@@ -714,6 +714,7 @@ def _rewrite(blob: bytes, **changes) -> bytes:
         lambda blob, other: _rewrite(blob, vector="5"),
         lambda blob, other: _rewrite(blob, format=99),
         lambda blob, other: _scaled(blob, 100.0),
+        lambda blob, other: _scaled(blob, 1.01),
         lambda blob, other: _scaled(blob, np.inf),
         lambda blob, other: _scaled(blob, np.nan),
         lambda blob, other: (
@@ -732,6 +733,7 @@ def _rewrite(blob: bytes, **changes) -> bytes:
         "length_type",
         "format",
         "scaled",
+        "slightly_scaled",
         "infinite",
         "nan",
         "deep_header",
@@ -795,6 +797,49 @@ def test_load_extracts_again_for_caches_of_another_length(
         "more", detector.prepare(_frame(make_scene, car=True, seed=2)), state="on"
     )
     assert detector.classify(_frame(make_scene, car=True, seed=3)).state == "on"
+
+
+def test_load_checks_cached_content_against_the_backend(make_scene) -> None:
+    """A cache of the right length but other content is extracted again."""
+    items, caches = _prepared_items(_detector(), make_scene)
+    originals = {key: data for key, data, _ in items}
+    swapped = {
+        "car": _recached(caches["empty"], originals["empty"], originals["car"]),
+        "empty": _recached(caches["car"], originals["car"], originals["empty"]),
+    }
+    backend = _CountingBackend()
+    detector = _counting_detector(backend)
+
+    report = detector.load(items, caches=swapped)
+
+    assert backend.calls == 1 + 2
+    assert report.caches == caches
+    assert detector.classify(_frame(make_scene, car=True, seed=3)).state == "on"
+
+
+def test_load_skips_a_blank_original_behind_a_forged_cache(make_scene) -> None:
+    items, caches = _prepared_items(_detector(), make_scene)
+    grey = encode_jpeg(Image.new("RGB", (120, 80), (128, 128, 128)))
+    car = items[0][1]
+    forged = {"grey": _recached(caches["car"], car, grey)} | caches
+    backend = _CountingBackend()
+    detector = _counting_detector(backend)
+
+    report = detector.load([("grey", grey, "on"), *items], caches=forged)
+
+    assert report.skipped == {"grey": SkipReason.BLANK}
+    assert report.loaded == 2
+
+
+def _recached(blob: bytes, source: bytes, original: bytes) -> bytes:
+    """Return the vector cached for ``source`` as a cache of ``original``."""
+    features = cache_module.restore(blob, source, "edges/1", SPOT, 1024)
+    assert features is not None
+    return cache_module.dump(features, original, SPOT, 1024)
+
+
+def test_cache_key_covers_decoder_and_inference_versions() -> None:
+    assert set(cache_module._VERSIONS) == {"tarsius", "pillow", "ncnn"}
 
 
 def test_load_ignores_a_cache_of_a_blank_region(make_scene) -> None:

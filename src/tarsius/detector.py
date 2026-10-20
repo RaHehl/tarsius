@@ -23,6 +23,8 @@ MAX_PER_STATE = 50
 # Real frames, IR nights included, stay above 20, a grey placeholder with
 # sensor noise below 2. The region itself may be uniform in one state.
 BLANK_STDDEV = 4.0
+# Cosine above which a cached vector counts as the one extracted now.
+_SAME_VECTOR = 1 - 1e-4
 
 
 class SkipReason(StrEnum):
@@ -250,8 +252,10 @@ class StateDetector:
         wins. A backend failure raises and leaves the references unchanged.
 
         ``caches`` maps keys to the ``cache`` of their prepared frame or of an
-        earlier report. A cache made for other settings, another backend or
-        another tarsius release is ignored, and the report holds a new one.
+        earlier report. A cache made for other settings, another backend, a
+        release of tarsius, Pillow or ncnn, or a damaged one is ignored, and
+        the report holds a new one. One reference is extracted anyway to check
+        the caches against the backend, if they disagree all are extracted.
         """
         latest = {key: (data, state) for key, data, state in items}
         with self._lock:
@@ -315,15 +319,20 @@ class StateDetector:
         latest: Mapping[str, tuple[bytes, str]],
         fresh: Mapping[str, bytes],
     ) -> bool:
-        """Check that every vector has the length the backend gives now."""
+        """Check the cached vectors against what the backend gives now."""
         if fresh:
             length = features[next(iter(fresh))].vector.size
-        else:
-            # All came from caches: extract one to learn the current length.
-            key = next(iter(features))
+            return all(f.vector.size == length for f in features.values())
+        # All came from caches: extract one and compare it with its cache.
+        key = next(iter(features))
+        try:
             image = load_image(latest[key][0], max_side=self._frame_side)
-            length = self._checked_features(image).vector.size
-        return all(f.vector.size == length for f in features.values())
+            probe = self._checked_features(image).vector
+        except ImageError, BlankRegionError:
+            # The full extraction skips it with its reason.
+            return False
+        cached = features[key].vector
+        return probe.size == cached.size and float(probe @ cached) >= _SAME_VECTOR
 
     def remove(self, keys: str | Iterable[str]) -> None:
         """Remove one or more references; unknown keys are ignored."""
