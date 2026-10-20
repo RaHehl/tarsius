@@ -10,6 +10,7 @@ from enum import StrEnum
 import numpy as np
 from PIL import Image, ImageStat
 
+from .backends.ncnn import NcnnBackend
 from .classifier import Classifier, Result, Status
 from .errors import BlankFrameError, BlankRegionError, ImageError
 from .features import FeatureBackend, Features, Vector, extract_features
@@ -54,6 +55,23 @@ class LoadReport:
     evicted: tuple[str, ...] = ()
 
 
+class _SharedBackend:
+    """The default backend of a task, loaded once per process."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._backend: FeatureBackend | None = None
+
+    def get(self) -> FeatureBackend:
+        with self._lock:
+            if self._backend is None:
+                self._backend = NcnnBackend()
+            return self._backend
+
+
+_STATE_BACKEND = _SharedBackend()
+
+
 class StateDetector:
     """
     The state of one region, learned from confirmed frames.
@@ -71,10 +89,10 @@ class StateDetector:
 
     def __init__(
         self,
-        backend: FeatureBackend,
         roi: Roi,
         states: Sequence[str],
         *,
+        backend: FeatureBackend | None = None,
         max_per_state: int = MAX_PER_STATE,
         k: int = 3,
         frame_side: int = FRAME_SIDE,
@@ -82,8 +100,12 @@ class StateDetector:
         """
         Create a detector for the given states, without references.
 
-        ``frame_side`` bounds the longer side frames are normalized to; small
-        details in a small region need more.
+        The detector picks its backend for this task, shared by all detectors
+        of the process; the first one loads the model, so this can block.
+        ``backend_id`` tells which one it is, and a stored original is simply
+        re-extracted when it changes. Pass ``backend`` only to override it,
+        e.g. in tests. ``frame_side`` bounds the longer side frames are
+        normalized to; small details in a small region need more.
         """
         if isinstance(states, str):
             raise ValueError("states must be a sequence of distinct names")
@@ -96,6 +118,8 @@ class StateDetector:
             raise ValueError("max_per_state must be at least 1")
         if frame_side < 1:
             raise ValueError("frame_side must be positive")
+        if backend is None:
+            backend = _STATE_BACKEND.get()
         self._backend = backend
         self._roi = roi
         self._states = tuple(states)

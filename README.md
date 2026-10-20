@@ -26,9 +26,10 @@ You confirm a few frames per state, tarsius compares new frames against them and
 Tarsiers are small nocturnal primates whose eyes are each about as large as their brain. Lots of eye, little brain, and very good at seeing in the dark. That is the idea here too: no training and no model to learn, just careful looking, including at IR night frames.
 
 ```python
-from tarsius import EdgeBackend, Roi, StateDetector
+from tarsius import Roi, StateDetector
 
-detector = StateDetector(EdgeBackend(), Roi.from_percent(10, 10, 60, 50), ("on", "off"))
+# The detector picks the backend for the task; detector.backend_id tells which.
+detector = StateDetector(Roi.from_percent(10, 10, 60, 50), ("on", "off"))
 
 # Teaching: check the frame, store prepared.original, add it.
 prepared = detector.prepare(car_jpeg)

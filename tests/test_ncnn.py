@@ -11,6 +11,7 @@ from tarsius import (
     Classifier,
     NcnnBackend,
     Roi,
+    StateDetector,
     Status,
     extract_features,
 )
@@ -81,3 +82,13 @@ def test_classify_with_rough_region(
         result = classifier.classify(features)
         assert result.status is Status.CONFIDENT
         assert result.state == ("occupied" if car else "free")
+
+
+@pytest.mark.usefixtures("backend")
+def test_state_detector_shares_its_default_backend() -> None:
+    """Without a backend, state detectors use ncnn, loaded once."""
+    first = StateDetector(CAR_SPOT, ("on", "off"))
+    second = StateDetector(Roi(0, 0, 1, 1), ("a", "b", "c"))
+
+    assert first.backend is second.backend
+    assert first.backend_id == NcnnBackend.id

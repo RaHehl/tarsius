@@ -107,7 +107,9 @@ def main():
         states = sorted({state for _, _, state, _ in rows})
         roi = Roi(*rois[camera])
         for name, factory in {"edges": EdgeBackend, "ncnn": NcnnBackend}.items():
-            make_detector = functools.partial(StateDetector, factory(), roi, states)
+            make_detector = functools.partial(
+                StateDetector, roi, states, backend=factory()
+            )
             preparer = make_detector()
             prepared = {}
             for _, frame, _, data in rows:

@@ -27,7 +27,7 @@ SPOT = Roi(0.28, 0.22, 0.72, 0.88)
 
 
 def _detector(**kwargs) -> StateDetector:
-    return StateDetector(EdgeBackend(), SPOT, ("on", "off"), **kwargs)
+    return StateDetector(SPOT, ("on", "off"), backend=EdgeBackend(), **kwargs)
 
 
 def _frame(make_scene, *, car: bool, seed: int, **kwargs) -> bytes:
@@ -56,7 +56,7 @@ def _grey(noise: float = 0.0) -> bytes:
 )
 def test_rejects_bad_states(states, match: str) -> None:
     with pytest.raises(ValueError, match=match):
-        StateDetector(EdgeBackend(), SPOT, states)
+        StateDetector(SPOT, states, backend=EdgeBackend())
 
 
 @pytest.mark.parametrize(
@@ -78,7 +78,7 @@ def test_settings_are_read_only() -> None:
 
 
 def test_not_ready_until_every_state(make_scene) -> None:
-    detector = StateDetector(EdgeBackend(), SPOT, ("on", "off", "half"))
+    detector = StateDetector(SPOT, ("on", "off", "half"), backend=EdgeBackend())
     _teach(detector, make_scene, "a", car=True, seed=0)
     _teach(detector, make_scene, "b", car=False, seed=0)
 
@@ -175,7 +175,7 @@ def test_add_rejects_unknown_state(make_scene) -> None:
 def test_add_rejects_prepared_from_other_detector(make_scene, other) -> None:
     options = {"roi": SPOT, **other}
     roi = options.pop("roi")
-    source = StateDetector(EdgeBackend(), roi, ("on", "off"), **options)
+    source = StateDetector(roi, ("on", "off"), backend=EdgeBackend(), **options)
     prepared = source.prepare(_frame(make_scene, car=True, seed=0))
     with pytest.raises(ValueError, match="another region"):
         _detector().add("a", prepared, state="on")
@@ -316,9 +316,9 @@ class _BlockingBackend(EdgeBackend):
 def test_add_during_load_is_kept(make_scene) -> None:
     """An add that arrives while load() runs is applied after it, not lost."""
     backend = _BlockingBackend()
-    detector = StateDetector(backend, SPOT, ("on", "off"))
+    detector = StateDetector(SPOT, ("on", "off"), backend=backend)
     stored = [("s0", _frame(make_scene, car=False, seed=0), "off")]
-    extra = StateDetector(EdgeBackend(), SPOT, ("on", "off")).prepare(
+    extra = StateDetector(SPOT, ("on", "off"), backend=EdgeBackend()).prepare(
         _frame(make_scene, car=True, seed=99)
     )
     loader = threading.Thread(target=detector.load, args=(stored,))
@@ -339,7 +339,7 @@ def test_add_during_load_is_kept(make_scene) -> None:
 
 
 def test_classify_during_changes_never_skips_a_state(make_scene) -> None:
-    detector = StateDetector(EdgeBackend(), SPOT, ("on", "off", "half"))
+    detector = StateDetector(SPOT, ("on", "off", "half"), backend=EdgeBackend())
     _teach(detector, make_scene, "a", car=True, seed=0)
     _teach(detector, make_scene, "b", car=False, seed=0)
     half = detector.prepare(_frame(make_scene, car=True, seed=1))
@@ -383,7 +383,7 @@ class _StubBackend:
 
 
 def test_load_skips_region_without_structure(make_scene) -> None:
-    detector = StateDetector(_StubBackend(110, None), FULL_FRAME, ("on", "off"))
+    detector = StateDetector(FULL_FRAME, ("on", "off"), backend=_StubBackend(110, None))
     odd = encode_jpeg(make_scene(car=True, seed=0).resize((110, 60)))
     report = detector.load(
         [("odd", odd, "on"), ("car", _frame(make_scene, car=True, seed=0), "on")]
@@ -395,7 +395,9 @@ def test_load_skips_region_without_structure(make_scene) -> None:
 def test_load_backend_failure_keeps_references(make_scene) -> None:
     """A broken backend must not look like every reference being unusable."""
     detector = StateDetector(
-        _StubBackend(110, BackendError("ncnn failed")), FULL_FRAME, ("on", "off")
+        FULL_FRAME,
+        ("on", "off"),
+        backend=_StubBackend(110, BackendError("ncnn failed")),
     )
     detector.load([("car", _frame(make_scene, car=True, seed=0), "on")])
     odd = encode_jpeg(make_scene(car=True, seed=0).resize((110, 60)))
@@ -423,7 +425,7 @@ def test_classify_snapshot_missing_a_state(
 def test_uniform_region_in_a_real_frame_is_usable(make_scene) -> None:
     """A region may be plain in one state, only a blank frame is refused."""
     corner = Roi(0.0, 0.85, 0.15, 1.0)
-    detector = StateDetector(EdgeBackend(), corner, ("on", "off"))
+    detector = StateDetector(corner, ("on", "off"), backend=EdgeBackend())
     frame = make_scene(car=True, seed=0, clutter=False)
     region = np.asarray(corner.crop(frame).convert("L"), dtype=float)
     assert region.std() < 4.0
@@ -507,7 +509,7 @@ def test_load_keeps_k(make_scene) -> None:
 
 def test_classify_region_without_structure_is_unsure(make_scene) -> None:
     """A dark or plain region in a working camera is unsure, not an error."""
-    detector = StateDetector(_StubBackend(110, None), FULL_FRAME, ("on", "off"))
+    detector = StateDetector(FULL_FRAME, ("on", "off"), backend=_StubBackend(110, None))
     detector.add(
         "car", detector.prepare(_frame(make_scene, car=True, seed=0)), state="on"
     )
@@ -539,7 +541,7 @@ def test_dark_frame_with_structure_is_not_blank(make_scene) -> None:
 
 
 def test_blank_errors_tell_frame_from_region(make_scene) -> None:
-    detector = StateDetector(_StubBackend(110, None), FULL_FRAME, ("on", "off"))
+    detector = StateDetector(FULL_FRAME, ("on", "off"), backend=_StubBackend(110, None))
     with pytest.raises(BlankFrameError):
         detector.prepare(_grey(1.5))
     plain = encode_jpeg(make_scene(car=True, seed=1).resize((110, 60)))
