@@ -5,8 +5,9 @@ Same data as history_split.py. The temperature is fitted on the frames between
 TARSIUS_FIT_SPLIT and TARSIUS_SPLIT, with references from before the first,
 and checked on the frames after TARSIUS_SPLIT with references from before it.
 References are 1, 2 and 5 segments per state over several seeds, so a frame
-counts once per budget and seed. The fit minimizes the negative log likelihood
-of the true states.
+counts once per budget and seed. A camera without every state before the
+split cannot be taught there and only counts in the check. The fit
+minimizes the negative log likelihood of the true states.
 Usage: calibrate.py <camera> [<camera> ...]
 """
 
@@ -106,7 +107,8 @@ def main():
             checking += collect(rows, prepared, make_detector, before=SPLIT)
         temperature = fit(fitting) if fitting else None
         if temperature is None:
-            print(f"{name}: no temperature, the fit frames hold no usable errors")
+            reason = "nothing to fit" if not fitting else "the fit hit the grid edge"
+            print(f"{name}: no temperature, {reason}")
             continue
         error, high, right = report(checking, temperature)
         print(
