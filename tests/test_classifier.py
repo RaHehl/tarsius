@@ -155,6 +155,16 @@ def test_temperature_sets_confidence(
     assert low <= result.probabilities["occupied"] <= high
 
 
+def test_probabilities_do_not_overflow() -> None:
+    classifier = Classifier("test/1", margin=0.05, temperature=1e-4)
+    classifier.add("a", _features(1, 0, 0, 0), state="occupied")
+    classifier.add("b", _features(0, 1, 0, 0), state="free")
+
+    result = classifier.classify(_features(1, 0.1, 0, 0))
+
+    assert result.probabilities == {"occupied": 1.0, "free": 0.0}
+
+
 def test_backends_bring_a_temperature() -> None:
     classifier = Classifier.for_backend(EdgeBackend())
     assert classifier.temperature == EdgeBackend.temperature

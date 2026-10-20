@@ -21,7 +21,8 @@ def majority(results: Sequence[Result], *, min_share: float = 0.5) -> Result:
     ``candidate`` is the state most frames leaned to, confident or not, ties
     going to the earliest frame, ``margin`` is the confident share of the
     reported state or candidate, and ``probabilities`` are the mean of the
-    frames' probabilities.
+    frames' probabilities. The status comes from the votes, so the mean can
+    lean to another state when a few frames were very sure of it.
     """
     if not 0.5 <= min_share < 1:
         raise ValueError("min_share must be in [0.5, 1)")

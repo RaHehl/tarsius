@@ -36,7 +36,7 @@ class NcnnBackend:
     # Bump with any change to the model, ncnn options or preprocessing.
     id = "squeezenet11/2"
     default_margin = 0.02
-    temperature = 0.019
+    temperature = 0.028
 
     def __init__(self, *, threads: int = 1) -> None:
         """Load the bundled model; blocking file I/O, raises BackendError."""
