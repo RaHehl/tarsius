@@ -39,6 +39,8 @@ class Result:
     scores: Mapping[str, float] = field(default_factory=dict)
     # Most similar reference key per state.
     nearest: Mapping[str, str] = field(default_factory=dict)
+    # Estimated probability per state, summing to 1. Empty when not ready.
+    probabilities: Mapping[str, float] = field(default_factory=dict)
 
 
 class _Index(NamedTuple):
@@ -53,18 +55,24 @@ class Classifier:
 
     A state wins only when its mean top-k similarity beats every other state
     by ``margin``. ``k`` shrinks to the smallest state's reference count, so
-    adding references to one state never makes it lose. Safe to share between
+    adding references to one state never makes it lose. Probabilities are a
+    softmax of the scores divided by ``temperature``. Safe to share between
     threads: changes swap in a new snapshot that lookups read once.
     """
 
-    def __init__(self, backend_id: str, *, margin: float, k: int = 3) -> None:
+    def __init__(
+        self, backend_id: str, *, margin: float, temperature: float, k: int = 3
+    ) -> None:
         """Create an empty classifier for features of ``backend_id``."""
         if k < 1:
             raise ValueError("k must be at least 1")
         if margin <= 0:
             raise ValueError("margin must be positive, a tie is never confident")
+        if temperature <= 0:
+            raise ValueError("temperature must be positive")
         self.backend_id = backend_id
         self.margin = margin
+        self.temperature = temperature
         self.k = k
         self._lock = threading.Lock()
         self._refs: dict[str, tuple[str, Vector]] = {}
@@ -72,8 +80,13 @@ class Classifier:
 
     @classmethod
     def for_backend(cls, backend: FeatureBackend, *, k: int = 3) -> Classifier:
-        """Create a classifier with the backend's id and default margin."""
-        return cls(backend.id, margin=backend.default_margin, k=k)
+        """Create a classifier with the backend's id, margin and temperature."""
+        return cls(
+            backend.id,
+            margin=backend.default_margin,
+            temperature=backend.temperature,
+            k=k,
+        )
 
     def add(self, key: str, features: Features, *, state: str) -> None:
         """
@@ -178,6 +191,7 @@ class Classifier:
             margin,
             scores,
             nearest,
+            softmax(scores, self.temperature),
         )
 
     def _check(self, backend_id: str) -> None:
@@ -195,3 +209,11 @@ class Classifier:
             np.array([self._refs[key][0] for key in keys]),
             np.stack([self._refs[key][1] for key in keys]),
         )
+
+
+def softmax(scores: Mapping[str, float], temperature: float) -> dict[str, float]:
+    """Return the softmax of ``scores`` divided by ``temperature``."""
+    values = np.array(list(scores.values()), dtype=np.float64) / temperature
+    weights = np.exp(values - values.max())
+    weights /= weights.sum()
+    return dict(zip(scores, weights.tolist(), strict=True))

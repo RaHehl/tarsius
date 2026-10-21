@@ -24,6 +24,7 @@ class EdgeBackend:
 
     id = "edges/1"
     default_margin = 0.02
+    temperature = 0.077
 
     def extract(self, image: Image.Image) -> tuple[Vector, Vector]:
         """Return the centre crop and every shifted window of the edge map."""

@@ -269,7 +269,10 @@ class StateDetector:
                 del labels[key], vectors[key]
                 fresh.pop(key, None)
             classifier = Classifier(
-                self._backend.id, margin=self._classifier.margin, k=self._k
+                self._backend.id,
+                margin=self._classifier.margin,
+                temperature=self._classifier.temperature,
+                k=self._k,
             )
             classifier.add_many(
                 (key, features[key], state) for key, state in labels.items()
@@ -358,7 +361,11 @@ class StateDetector:
         features = extract_features(self._backend, image, self._roi)
         if not features.has_structure:
             # Every reference would score the same, there is no candidate.
-            return Result(Status.UNSURE, scores=dict.fromkeys(self._states, 0.0))
+            return Result(
+                Status.UNSURE,
+                scores=dict.fromkeys(self._states, 0.0),
+                probabilities=dict.fromkeys(self._states, 1 / len(self._states)),
+            )
         result = classifier.classify(features)
         # A reference may have been removed since the check above.
         if len(result.scores) < len(self._states):

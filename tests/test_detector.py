@@ -374,6 +374,7 @@ class _StubBackend:
 
     id = "edges/1"
     default_margin = 0.02
+    temperature = 0.077
 
     def __init__(self, fail_width: int, error: Exception | None) -> None:
         self._edges = EdgeBackend()
@@ -514,22 +515,38 @@ def test_load_keeps_k(make_scene) -> None:
     assert result.scores["on"] == pytest.approx(1.0, abs=1e-5)
 
 
-def test_classify_region_without_structure_is_unsure(make_scene) -> None:
+@pytest.mark.parametrize("states", [("on", "off"), ("on", "off", "half")])
+def test_classify_region_without_structure_is_unsure(
+    make_scene, states: tuple[str, ...]
+) -> None:
     """A dark or plain region in a working camera is unsure, not an error."""
-    detector = StateDetector(FULL_FRAME, ("on", "off"), backend=_StubBackend(110, None))
-    detector.add(
-        "car", detector.prepare(_frame(make_scene, car=True, seed=0)), state="on"
-    )
-    detector.add(
-        "empty", detector.prepare(_frame(make_scene, car=False, seed=0)), state="off"
-    )
-    plain = encode_jpeg(make_scene(car=True, seed=1).resize((110, 60)))
+    detector = StateDetector(FULL_FRAME, states, backend=_StubBackend(110, None))
+    for seed, state in enumerate(states):
+        frame = _frame(make_scene, car=state == "on", seed=seed)
+        detector.add(state, detector.prepare(frame), state=state)
+    plain = encode_jpeg(make_scene(car=True, seed=9).resize((110, 60)))
 
     result = detector.classify(plain)
 
     assert result.status is Status.UNSURE
     assert result.candidate is None
-    assert result.scores == {"on": 0.0, "off": 0.0}
+    assert result.scores == dict.fromkeys(states, 0.0)
+    assert result.probabilities == pytest.approx(dict.fromkeys(states, 1 / len(states)))
+
+
+def test_load_keeps_the_backend_temperature(make_scene) -> None:
+    detector = _detector()
+    detector.load(
+        [
+            ("car", _frame(make_scene, car=True, seed=0), "on"),
+            ("empty", _frame(make_scene, car=False, seed=0), "off"),
+        ]
+    )
+
+    result = detector.classify(_frame(make_scene, car=True, seed=1))
+
+    expected = 1 / (1 + np.exp(-result.margin / EdgeBackend.temperature))
+    assert result.probabilities["on"] == pytest.approx(expected)
 
 
 def test_dark_frame_with_structure_is_not_blank(make_scene) -> None:

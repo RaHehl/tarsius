@@ -49,16 +49,11 @@ def load(camera):
     return rows
 
 
-def run(rows, prepared, make_detector, budget, seed, *, ask):
-    """
-    Teach `budget` older segments per state, then classify the newest frames.
-
-    With `ask`, every unsure frame is answered and taught, one question per
-    segment, like confirming in a dialog.
-    """
+def teach(rows, prepared, make_detector, budget, seed, *, before=SPLIT):
+    """Return a detector taught with `budget` segments per state before `before`."""
     older = {}
     for index, name, state, _ in rows:
-        if name < SPLIT:
+        if name < before:
             older.setdefault(state, set()).add(index)
     rng = random.Random(seed)
     chosen = set()
@@ -66,8 +61,19 @@ def run(rows, prepared, make_detector, budget, seed, *, ask):
         chosen |= set(rng.sample(sorted(ids), min(budget, len(ids))))
     detector = make_detector()
     for index, name, state, _ in rows:
-        if index in chosen and name in prepared:
+        if index in chosen and name < before and name in prepared:
             detector.add(name, prepared[name], state=state)
+    return detector
+
+
+def run(rows, prepared, make_detector, budget, seed, *, ask):
+    """
+    Teach `budget` older segments per state, then classify the newest frames.
+
+    With `ask`, every unsure frame is answered and taught, one question per
+    segment, like confirming in a dialog.
+    """
+    detector = teach(rows, prepared, make_detector, budget, seed)
     stats = {
         "seconds": 0.0,
         "n": 0,

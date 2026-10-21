@@ -21,6 +21,9 @@ class FeatureBackend(Protocol):
     id: str
     # Similarity gap between the two best states below which a result is unsure.
     default_margin: float
+    # Softmax temperature that turns scores into probabilities, fitted on
+    # recorded history with scripts/calibrate.py.
+    temperature: float
 
     def extract(self, image: Image.Image) -> tuple[Vector, Vector]:
         """
