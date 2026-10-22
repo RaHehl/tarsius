@@ -62,6 +62,8 @@ class Rejection(StrEnum):
     TOO_FAST = "too_fast"
     # No confirmed value to compare against yet, from Plausibility.
     UNCONFIRMED = "unconfirmed"
+    # An unsure rise of a whole step waits for a second reading, Plausibility.
+    RISE_UNCONFIRMED = "rise_unconfirmed"
 
 
 @dataclass(frozen=True, slots=True)

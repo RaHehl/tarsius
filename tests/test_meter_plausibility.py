@@ -666,7 +666,7 @@ def test_unsure_step_rise_waits_for_a_second_reading() -> None:
     # Red wheels without dials: a 3 read as 6 rises 0.3 within the rate.
     guard = _guard(638.3, max_rate=2.4)
     first = guard.review(_unsure(638.601), T0 + timedelta(hours=1))
-    assert first.rejection is Rejection.TOO_FAST
+    assert first.rejection is Rejection.RISE_UNCONFIRMED
     assert guard.state is not None
     assert guard.state.jump == (638.601, T0 + timedelta(hours=1))
     second = guard.review(_unsure(638.603), T0 + timedelta(hours=1, minutes=5))
@@ -681,7 +681,7 @@ def test_unsure_step_rise_that_does_not_repeat_stays_out() -> None:
     right = guard.review(_unsure(638.302), T0 + timedelta(hours=1, minutes=5))
     assert right.value == 638.302
     assert guard.review(_unsure(638.601), T0 + timedelta(hours=2)).rejection is (
-        Rejection.TOO_FAST
+        Rejection.RISE_UNCONFIRMED
     )
 
 
@@ -705,3 +705,16 @@ def test_jump_round_trip_and_checks() -> None:
         data = state.as_dict() | {"jump": jump}
         with pytest.raises(MeterDataError, match="jump"):
             PlausibilityState.from_dict(data)
+
+
+def test_unsure_rise_that_disagrees_with_the_waiting_one_waits_again() -> None:
+    guard = _guard(638.3, max_rate=2.4)
+    guard.review(_unsure(638.601), T0 + timedelta(hours=1))
+    # 0.9 above the waiting one within 5 minutes: no agreement.
+    later = T0 + timedelta(hours=1, minutes=5)
+    assert guard.review(_unsure(639.501), later).rejection is (
+        Rejection.RISE_UNCONFIRMED
+    )
+    assert guard.state is not None
+    assert guard.state.jump == (639.501, later)
+    assert _vt(guard) == (638.3, T0)

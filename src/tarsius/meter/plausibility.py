@@ -374,7 +374,7 @@ class Plausibility:
             rejections = {rejection, *(r for r, _ in judged)}
             return self._unfitting(reading, rejections, value, at, step, hold)
         if self._unconfirmed_jump(reading, chosen[0], at, step, hold):
-            return reading.rejected(Rejection.TOO_FAST)
+            return reading.rejected(Rejection.RISE_UNCONFIRMED)
         return self._take(reading, *chosen, at)
 
     def _unfitting(
