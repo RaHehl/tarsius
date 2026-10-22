@@ -1,0 +1,181 @@
+"""
+Cut a counter window into wheel cells, and settle how once per installation.
+
+The raster and which way up the window is are properties of the
+installation, not of the frame, so they are searched once and stored.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
+from typing import Any
+
+import numpy as np
+from PIL import Image
+
+from .compose import compose
+from .engine import Model, Reading
+
+# Search grid in units of the cell pitch (offset) and of the nominal cell
+# (width, height). Small on purpose: it corrects framing, not placement.
+OFFSETS = (-0.10, -0.05, 0.0, 0.05, 0.10)
+WIDTHS = (0.72, 0.86, 1.0)
+# 0.72 was worth 2.4 points of whole readings on loosely found windows.
+HEIGHTS = (0.72, 0.86, 1.0)
+# Orientation log-odds margin at or below which the window is upside down.
+# Calibrated on synthetic strips: 70 % of turned strips caught, 7 % false.
+UPSIDE_DOWN_MARGIN = -4.0
+
+
+@dataclass(frozen=True, slots=True)
+class Raster:
+    """How cells are cut from the window."""
+
+    # Shift of the whole raster, in cell pitches.
+    offset: float = 0.0
+    # Cell width as a fraction of the pitch.
+    width: float = 1.0
+    # Cell height as a fraction of the window height.
+    height: float = 1.0
+
+
+@dataclass(frozen=True, slots=True)
+class Calibration:
+    """
+    Raster and orientation of one installation, from :meth:`MeterReader.calibrate`.
+
+    Store it next to the layout and pass it to every read. It belongs to the
+    layout it was made for; calibrate again after changing the layout.
+    """
+
+    raster: Raster = Raster()
+    # The meter is mounted upside down: wheels and dials are read turned.
+    upside_down: bool = False
+    # Orientation evidence: log-odds upright minus turned, summed over frames.
+    orientation_margin: float = 0.0
+    # Mean wheel confidence on the chosen raster, 0 to 1.
+    score: float = 0.0
+    # Share of the search grid reading the same whole digits as the chosen
+    # raster, 0 to 1. Around 0.8 when the window is found well, around 0.3
+    # when the readings are wrong; low values mean the window needs fixing.
+    agreement: float = 0.0
+
+    def as_dict(self) -> dict[str, Any]:
+        """Return a JSON-compatible form."""
+        return {
+            "offset": self.raster.offset,
+            "width": self.raster.width,
+            "height": self.raster.height,
+            "upside_down": self.upside_down,
+            "orientation_margin": self.orientation_margin,
+            "score": self.score,
+            "agreement": self.agreement,
+        }
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> Calibration:
+        """Rebuild a calibration from :meth:`as_dict`; raises ValueError if invalid."""
+        try:
+            return cls(
+                Raster(
+                    float(data["offset"]), float(data["width"]), float(data["height"])
+                ),
+                bool(data["upside_down"]),
+                float(data.get("orientation_margin", 0.0)),
+                float(data.get("score", 0.0)),
+                float(data.get("agreement", 0.0)),
+            )
+        except (KeyError, TypeError) as err:
+            raise ValueError(f"invalid calibration: {err!r}") from err
+
+
+GRID = tuple(Raster(o, w, h) for o in OFFSETS for w in WIDTHS for h in HEIGHTS)
+
+
+def cells(window: Image.Image, wheels: int, raster: Raster) -> list[Image.Image]:
+    """Cut the window into one cell per wheel, left to right."""
+    width, height = window.size
+    pitch = width / wheels
+    cell_w, cell_h = pitch * raster.width, height * raster.height
+    y0 = (height - cell_h) / 2
+    out = []
+    for i in range(wheels):
+        cx = pitch * (i + 0.5 + raster.offset)
+        out.append(
+            window.crop(
+                (
+                    int(cx - cell_w / 2),
+                    int(y0),
+                    int(cx + cell_w / 2),
+                    int(y0 + cell_h),
+                )
+            )
+        )
+    return out
+
+
+def read_cells(
+    model: Model, crops: Sequence[Image.Image], *, views: int = 1
+) -> list[Reading]:
+    """Read each crop with ``model``."""
+    h, w = model.input_hw
+    return [
+        model.inspect(
+            np.asarray(
+                c.convert("RGB").resize((w, h), Image.Resampling.BILINEAR), np.float32
+            ),
+            views=views,
+        )
+        for c in crops
+    ]
+
+
+def orientation_margin(model: Model, window: Image.Image, wheels: int) -> float:
+    """
+    Return log-odds that the window is upright rather than turned.
+
+    Compared against the window's own rotation rather than a fixed cutoff,
+    since the orientation head reads real crops as more upright across the
+    board. The cells are independent evidence about one question, so their
+    log-odds add.
+    """
+
+    def evidence(image: Image.Image) -> float:
+        readings = read_cells(model, cells(image, wheels, Raster()))
+        p = np.clip([r.upside_down for r in readings], 1e-4, 1 - 1e-4)
+        return float(np.sum(np.log((1 - p) / p)))
+
+    return evidence(window) - evidence(window.rotate(180))
+
+
+def whole_digits(readings: Sequence[Reading]) -> int:
+    """Return the whole number the wheels show, the key for agreement."""
+    return int(compose([r.value for r in readings]).value)
+
+
+def calibrate(model: Model, windows: Sequence[Image.Image], wheels: int) -> Calibration:
+    """
+    Settle orientation and raster for an installation from upright-cut windows.
+
+    Alignment is scored by the value head, orientation by the orientation
+    head: scoring both by orientation let a raster that merely looked upright
+    win, and did worse than not calibrating.
+    """
+    margin = sum(orientation_margin(model, w, wheels) for w in windows)
+    upside_down = margin <= UPSIDE_DOWN_MARGIN
+    views = [w.rotate(180) if upside_down else w for w in windows]
+    scores = np.zeros(len(GRID))
+    keys: list[list[int]] = [[] for _ in windows]
+    for g, raster in enumerate(GRID):
+        for i, view in enumerate(views):
+            readings = read_cells(model, cells(view, wheels, raster))
+            scores[g] += float(np.mean([r.confidence for r in readings]))
+            keys[i].append(whole_digits(readings))
+    best = int(np.argmax(scores))
+    agreement = float(
+        np.mean([np.mean([k == frame[best] for k in frame]) for frame in keys])
+    )
+    return Calibration(
+        GRID[best], upside_down, margin, float(scores[best] / len(views)), agreement
+    )

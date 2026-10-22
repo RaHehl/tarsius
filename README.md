@@ -73,6 +73,57 @@ The other camera scores 100 % with both backends.
 About 30 ms per 4 MP frame with edges and 36 ms with ncnn, including JPEG decoding, on one thread of an Intel i5-8400T.
 A small sample, not a guarantee. `scripts/history_split.py` runs the same evaluation with `StateDetector` on your own recordings. It also reports how often the detector would ask when unsure answers are confirmed.
 
+## Reading meters
+
+`tarsius.meter` reads utility meters with counter wheels and optional pointer dials. You give the regions once, it reads a value from each frame and says why when it will not.
+
+```python
+from tarsius import Roi
+from tarsius.meter import Dial, MeterLayout, MeterReader, Plausibility
+
+layout = MeterLayout(
+    digits=Roi.from_percent(45, 13, 78, 28),  # the counter window, all wheels
+    wheels=5,
+    dials=(  # most significant first: x0.1, x0.01
+        Dial(Roi.from_percent(74, 46, 92, 70)),
+        Dial(Roi.from_percent(62, 69, 80, 93)),
+    ),
+    rotation=-25.0,  # degrees counter-clockwise that make the window level
+)
+reader = MeterReader()
+calibration = reader.calibrate([jpeg_1, jpeg_2], layout)  # once, store as_dict()
+reading = reader.read(jpeg, layout, calibration)
+reading.value  # 627.8846, or None when rejected
+reading.candidate  # the composed value, also when rejected
+reading.rejection  # None, FAULT, LOW_CONFIDENCE or INCONSISTENT
+
+guard = Plausibility(max_rate=5.0, tolerance=0.0002)  # units per hour
+reading = guard.review(reading, at=now)  # adds DECREASED or TOO_FAST
+store(guard.state.as_dict())  # and pass state=PlausibilityState.from_dict(...)
+```
+
+Regions are fractions of the frame after turning it by `rotation` about its centre, like `PIL.Image.rotate`. The window is cut into `wheels` equal cells; `decimal_wheels` marks the rightmost ones as fractions. Dials run most significant first, `Dial(..., counterclockwise=True)` for those that turn the other way. `MeterLayout`, `Calibration` and `PlausibilityState` convert to and from JSON-compatible dicts.
+
+Wheels and dials are composed with the carry rule, not concatenated: a wheel at 1.7 shows 1 or 2 depending on the wheels below it, so each wheel is resolved against what the lower ones contribute, and an upper wheel that jumps instead of rolling is recognized too. How badly the positions contradict each other is `reading.residual`, above `max_residual` (0.4 digits) the reading is rejected as inconsistent. The last wheel or dial keeps its fraction: a rolling last wheel reads 601.6, not 602.
+
+`calibrate()` decides whether the meter is mounted upside down and searches the cell raster (offset, cell width and height) on one or more frames. It costs about 45 reads, 0.36 s per frame on the i5-8400T; run it at setup and after the camera moved. `calibration.agreement` is the share of the search grid that reads the same whole number, low values mean the window needs fixing. Without a calibration `read()` cuts equal upright cells.
+
+The readers are small numpy networks: 475k parameters for a wheel (32×20 pixels), 168k for a dial. About 18 ms per read of five wheels and four dials on one thread of an i5-8400T, including JPEG decoding. `MeterReader(views=3)` also reads each crop shifted by a pixel and averages, which costs three times as much. The methods block and are safe to call from several threads; the readers load on first use (2.6 MB) and are shared per process.
+
+Results so far, one water meter (Corona MWI: five wheels, four dials), 696 frames of 640×480 over two days, compared with the value an existing reader on the same camera reported. Regions taken from that reader, calibrated on ten frames:
+
+| | |
+|---|---|
+| within 0.01 m³ | 99.7 % (the two others lie between two reference rounds) |
+| within 0.001 m³ | 97.1 % |
+| whole m³ right | 100 % |
+| rejected with the defaults | 1.7 %, all as inconsistent |
+| rejected by `Plausibility` | none |
+
+One meter, so this says the pipeline works on it, not how well it carries over to other meters.
+
+The models were trained by the author on generated meters and the training split of the Word-Wheel Water Meter Dataset (Zhao et al., Dryad, CC0-1.0, [doi:10.5061/dryad.7d7wm3860](https://doi.org/10.5061/dryad.7d7wm3860)), with thanks to its authors. See `src/tarsius/meter/models/MODELS.md`.
+
 ## Development
 
 ```sh
@@ -82,10 +133,12 @@ uv run pytest
 uvx prek run --all-files
 ```
 
-The ncnn model is not stored in git. `scripts/build_model.sh` converts the original SqueezeNet 1.1 release with the ncnn tools. Inputs and outputs are checked against pinned sha256 sums, so CI and a local run produce the same files. It needs x86_64 Linux with `curl`, `unzip`, `libgomp1` and `libprotobuf32t64` (Ubuntu 24.04).
+The SqueezeNet model is not stored in git. `scripts/build_model.sh` converts the original SqueezeNet 1.1 release with the ncnn tools. Inputs and outputs are checked against pinned sha256 sums, so CI and a local run produce the same files. It needs x86_64 Linux with `curl`, `unzip`, `libgomp1` and `libprotobuf32t64` (Ubuntu 24.04).
+
+The meter models are stored in git with their sha256 sums, since their training outputs are not public. See `src/tarsius/meter/models/MODELS.md`.
 
 Releases: every PR gets a label, Release Drafter collects them into a draft, publishing the GitHub release builds and uploads to PyPI.
 
 ## License
 
-Apache-2.0. The bundled SqueezeNet model is BSD-2-Clause, see NOTICE.
+Apache-2.0. The bundled SqueezeNet model is BSD-2-Clause, see NOTICE. The meter models are Apache-2.0.
