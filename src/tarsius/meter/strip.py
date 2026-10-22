@@ -12,12 +12,13 @@ from dataclasses import dataclass
 from typing import Any
 
 import numpy as np
+import numpy.typing as npt
 from PIL import Image
 
 from ..errors import MeterDataError
 from . import checks
 from .compose import compose
-from .engine import Model, Reading
+from .engine import Exposure, Model, Reading
 
 # Search grid in units of the cell pitch (offset) and of the nominal cell
 # (width, height). Small on purpose: it corrects framing, not placement.
@@ -68,11 +69,18 @@ class Calibration:
     # raster, 0 to 1. Around 0.8 when the window is found well, around 0.3
     # when the readings are wrong; low values mean the window needs fixing.
     agreement: float = 0.0
+    # Exposure of each wheel, then each dial, on the calibration frames; a
+    # read faults on departures from it. Empty: fixed limits only.
+    exposure: tuple[Exposure, ...] = ()
 
     def __post_init__(self) -> None:
         """Reject values a calibration cannot have; raises MeterDataError."""
         if not isinstance(self.raster, Raster):
             raise MeterDataError(f"raster must be a Raster, got {self.raster!r}")
+        object.__setattr__(self, "exposure", tuple(self.exposure))
+        for item in self.exposure:
+            if not isinstance(item, Exposure):
+                raise MeterDataError(f"exposure must be Exposure, got {item!r}")
         checks.flag(self.upside_down, "upside_down")
         checks.number(self.orientation_margin, "orientation_margin")
         checks.within(checks.number(self.score, "score"), 0.0, 1.0, "score")
@@ -88,6 +96,7 @@ class Calibration:
             "orientation_margin": self.orientation_margin,
             "score": self.score,
             "agreement": self.agreement,
+            "exposure": [item.as_list() for item in self.exposure],
         }
 
     @classmethod
@@ -101,11 +110,41 @@ class Calibration:
                 data.get("orientation_margin", 0.0),
                 data.get("score", 0.0),
                 data.get("agreement", 0.0),
+                _exposure(data.get("exposure", [])),
             )
         except KeyError as err:
             raise MeterDataError(f"invalid calibration: missing {err}") from err
         except MeterDataError as err:
             raise MeterDataError(f"invalid calibration: {err}") from err
+
+
+def _exposure(data: object) -> tuple[Exposure, ...]:
+    if isinstance(data, str | bytes) or not isinstance(data, Sequence):
+        raise MeterDataError(f"exposure must be a list, got {data!r}")
+    items = []
+    for item in data:
+        if isinstance(item, str | bytes) or not isinstance(item, Sequence):
+            raise MeterDataError(f"exposure must be lists of 5 numbers, got {item!r}")
+        if len(item) != 5:
+            raise MeterDataError(f"exposure must be lists of 5 numbers, got {item!r}")
+        items.append(Exposure(*item))
+    return tuple(items)
+
+
+def pixels(image: Image.Image, hw: tuple[int, int]) -> npt.NDArray[np.float32]:
+    """Return a crop resized to a reader's ``(height, width)`` as float RGB."""
+    h, w = hw
+    return np.asarray(
+        image.convert("RGB").resize((w, h), Image.Resampling.BILINEAR), np.float32
+    )
+
+
+def median_exposure(samples: Sequence[Sequence[Exposure]]) -> tuple[Exposure, ...]:
+    """Return the per-element median of several frames' exposures."""
+    return tuple(
+        Exposure(*(float(v) for v in np.median([e.as_list() for e in column], axis=0)))
+        for column in zip(*samples, strict=True)
+    )
 
 
 GRID = tuple(Raster(o, w, h) for o in OFFSETS for w in WIDTHS for h in HEIGHTS)
@@ -132,16 +171,7 @@ def read_cells(
     model: Model, crops: Sequence[Image.Image], *, views: int = 1
 ) -> list[Reading]:
     """Read each crop with ``model``."""
-    h, w = model.input_hw
-    return [
-        model.inspect(
-            np.asarray(
-                c.convert("RGB").resize((w, h), Image.Resampling.BILINEAR), np.float32
-            ),
-            views=views,
-        )
-        for c in crops
-    ]
+    return [model.inspect(pixels(c, model.input_hw), views=views) for c in crops]
 
 
 def orientation_margin(model: Model, window: Image.Image, wheels: int) -> float:

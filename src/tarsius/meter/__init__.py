@@ -8,7 +8,7 @@ too fast. ``tarsius.meter.finder`` can suggest the regions; it is alpha.
 """
 
 from .compose import Composition, compose
-from .engine import Fault, Reading
+from .engine import Exposure, Fault, Reading
 from .frame import METER_FRAME_SIDE
 from .layout import Dial, MeterLayout
 from .plausibility import Plausibility, PlausibilityState
@@ -20,6 +20,7 @@ __all__ = [
     "Calibration",
     "Composition",
     "Dial",
+    "Exposure",
     "Fault",
     "MeterLayout",
     "MeterReader",

@@ -10,6 +10,7 @@ from tarsius.meter import (
     MeterReading,
     Plausibility,
     PlausibilityState,
+    Reading,
     Rejection,
 )
 
@@ -118,42 +119,42 @@ def test_agreeing_lower_readings_replace_the_value() -> None:
     guard = _guard(628.5)
     results = [
         guard.review(_reading(value), T0 + (i + 1) * MINUTE)
-        for i, value in enumerate((627.50, 627.51, 627.52))
+        for i, value in enumerate((512.345, 512.346, 512.347))
     ]
     assert [r.rejection for r in results] == [Rejection.DECREASED] * 2 + [None]
-    assert results[-1].value == 627.52
-    assert guard.state == PlausibilityState(627.52, T0 + 3 * MINUTE)
+    assert results[-1].value == 512.347
+    assert guard.state == PlausibilityState(512.347, T0 + 3 * MINUTE)
 
 
 def test_disagreeing_lower_readings_start_over() -> None:
     guard = _guard(628.5, confirmations=2)
-    assert not guard.review(_reading(627.5), T0 + MINUTE).accepted
+    assert not guard.review(_reading(512.345), T0 + MINUTE).accepted
     # Lower than the pending one: a new candidate, not the second vote.
-    assert not guard.review(_reading(600.0), T0 + 2 * MINUTE).accepted
-    assert guard.review(_reading(600.0), T0 + 3 * MINUTE).accepted
+    assert not guard.review(_reading(498.765), T0 + 2 * MINUTE).accepted
+    assert guard.review(_reading(498.765), T0 + 3 * MINUTE).accepted
 
 
 def test_a_plausible_reading_drops_pending_lower_ones() -> None:
     guard = _guard(628.5, confirmations=2)
-    assert not guard.review(_reading(627.5), T0 + MINUTE).accepted
+    assert not guard.review(_reading(512.345), T0 + MINUTE).accepted
     assert guard.review(_reading(628.5), T0 + 2 * MINUTE).accepted
-    assert not guard.review(_reading(627.5), T0 + 3 * MINUTE).accepted
+    assert not guard.review(_reading(512.345), T0 + 3 * MINUTE).accepted
 
 
 def test_a_too_fast_reading_drops_pending_lower_ones() -> None:
     guard = _guard(628.5, confirmations=2)
-    assert not guard.review(_reading(627.5), T0 + MINUTE).accepted
+    assert not guard.review(_reading(512.345), T0 + MINUTE).accepted
     assert guard.review(_reading(900.0), T0 + 2 * MINUTE).rejection is (
         Rejection.TOO_FAST
     )
-    assert not guard.review(_reading(627.5), T0 + 3 * MINUTE).accepted
+    assert not guard.review(_reading(512.345), T0 + 3 * MINUTE).accepted
 
 
 def test_accept_drops_pending_lower_ones() -> None:
     guard = _guard(628.5, confirmations=2)
-    assert not guard.review(_reading(627.5), T0 + MINUTE).accepted
+    assert not guard.review(_reading(512.345), T0 + MINUTE).accepted
     guard.accept(628.5, T0 + 2 * MINUTE)
-    assert not guard.review(_reading(627.5), T0 + 3 * MINUTE).accepted
+    assert not guard.review(_reading(512.345), T0 + 3 * MINUTE).accepted
 
 
 def test_wrap_counts_on() -> None:
@@ -241,3 +242,102 @@ def test_values_must_be_finite() -> None:
 def test_invalid_settings(kwargs: dict[str, Any], match: str) -> None:
     with pytest.raises(MeterDataError, match=match):
         Plausibility(**kwargs)
+
+
+def _meter(
+    value: float,
+    *alternatives: float,
+    rejection: Rejection | None = None,
+) -> MeterReading:
+    """A reading of five wheels and four dials, like the maintainer's meter."""
+    dials = tuple(Reading(0.0, 0.9) for _ in range(4))
+    reading = MeterReading(
+        value, value, None, 0.9, 0.1, 0.0001, (), dials, tuple(alternatives)
+    )
+    return reading if rejection is None else reading.rejected(rejection)
+
+
+def test_alternative_that_fits_is_taken() -> None:
+    # A biased tens wheel reads 658.45; jumped instead it is 668.45.
+    guard = _guard(668.4)
+    reading = guard.review(_meter(658.45, 668.45), T0 + 5 * MINUTE)
+    assert reading.accepted
+    assert reading.value == 668.45
+    assert reading.candidate == 658.45
+    assert guard.state == PlausibilityState(668.45, T0 + 5 * MINUTE)
+
+
+def test_ambiguous_reading_is_resolved_by_the_last_value() -> None:
+    guard = _guard(619.95)
+    reading = _meter(620.97, 619.97, rejection=Rejection.AMBIGUOUS)
+    assert guard.review(reading, T0 + 5 * MINUTE).value == 619.97
+
+
+def test_smallest_rise_wins_when_several_fit() -> None:
+    # After a long gap a reading 10 higher fits too; the smaller rise wins.
+    guard = _guard(600.0)
+    reading = guard.review(_meter(615.5, 605.5), T0 + timedelta(hours=5))
+    assert reading.value == 605.5
+
+
+@pytest.mark.parametrize(
+    ("values", "rejection"),
+    [
+        ((658.45, 678.45), Rejection.AMBIGUOUS),
+        ((658.45, 648.45), Rejection.DECREASED),
+        ((688.45, 678.45), Rejection.TOO_FAST),
+    ],
+)
+def test_no_fit(values: tuple[float, ...], rejection: Rejection) -> None:
+    guard = _guard(668.4)
+    assert guard.review(_meter(*values), T0 + 5 * MINUTE).rejection is rejection
+    assert guard.state == PlausibilityState(668.4, T0)
+
+
+def test_other_rejections_pass_through() -> None:
+    guard = _guard(668.4)
+    reading = _meter(668.45, rejection=Rejection.INCONSISTENT)
+    assert guard.review(reading, T0 + 5 * MINUTE) is reading
+
+
+def test_a_misread_seen_again_never_replaces_the_value() -> None:
+    # Ten below, read the same way again and again: a biased wheel.
+    guard = _guard(668.4)
+    for i in range(1, 10):
+        reading = guard.review(_meter(658.41), T0 + i * 5 * MINUTE)
+        assert reading.rejection is Rejection.DECREASED
+    assert guard.state == PlausibilityState(668.4, T0)
+
+
+@pytest.mark.parametrize(("last", "new"), [(62700.0, 3.0), (6200.0, 3.0)])
+def test_new_meter_is_not_a_wrap(last: float, new: float) -> None:
+    guard = _guard(last, period=100000.0 if last > 10000 else 10000.0)
+    results = [
+        guard.review(_meter(new + 0.001 * i), T0 + i * 5 * MINUTE) for i in (1, 2, 3)
+    ]
+    assert [r.rejection for r in results] == [Rejection.DECREASED] * 2 + [None]
+    assert results[-1].value == pytest.approx(new + 0.003)
+
+
+def test_clock_that_was_ahead_is_repaired() -> None:
+    guard = _guard(500.0)
+    # The state was saved an hour ahead; a reading now is checked from now.
+    now = T0 - timedelta(hours=1)
+    assert guard.check(500.0, now) is None
+    guard.review(_reading(500.0), now)
+    assert guard.state == PlausibilityState(500.0, now)
+    reading = guard.review(_reading(500.3), now + 5 * MINUTE)
+    assert reading.accepted
+    assert guard.state == PlausibilityState(500.3, now + 5 * MINUTE)
+
+
+def test_small_clock_step_back_allows_no_rise() -> None:
+    guard = _guard(500.0)
+    assert guard.check(500.1, T0 - 5 * MINUTE) is Rejection.TOO_FAST
+
+
+def test_after_a_long_gap_any_drop_may_be_a_misread() -> None:
+    guard = _guard(628.5)
+    for i in range(1, 5):
+        later = T0 + timedelta(days=30) + i * 5 * MINUTE
+        assert guard.review(_reading(512.345), later).rejection is Rejection.DECREASED

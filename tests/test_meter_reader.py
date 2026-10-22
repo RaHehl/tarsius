@@ -117,7 +117,9 @@ def test_glare_on_a_wheel_is_a_fault(reader: MeterReader) -> None:
     centre = (left + 2.5 * (right - left) / 5, (top + bottom) / 2)
     blob = np.clip(3 - np.hypot(x - centre[0], y - centre[1]) / 12, 0, 1)
     pixels = np.clip(pixels + blob[..., None] * 400, 0, 255).astype(np.uint8)
-    reading = reader.read(Image.fromarray(pixels), layout())
+    # Only a calibration tells a glare blob from a light drum.
+    calibration = reader.calibrate(frame, layout())
+    reading = reader.read(Image.fromarray(pixels), layout(), calibration)
     assert reading.rejection is Rejection.FAULT
     assert reading.wheels[2].fault is Fault.GLARE
 
@@ -332,3 +334,37 @@ def test_bundled_models_match_their_checksums() -> None:
     assert set(sums) == bundled
     for name, digest in sums.items():
         assert hashlib.sha256((models / name).read_bytes()).hexdigest() == digest
+
+
+def test_calibration_records_the_exposure(reader: MeterReader) -> None:
+    frame = meter_frame("00627", (8.84, 8.4), roll=0.884)
+    calibration = reader.calibrate(frame, layout())
+    assert len(calibration.exposure) == 7
+    # Dark wheels with white digits, white dial faces.
+    assert calibration.exposure[0].level < 128 < calibration.exposure[-1].level
+    no_dials = reader.calibrate(meter_frame("00627", ()), layout(dials=0))
+    assert len(no_dials.exposure) == 5
+
+
+def test_calibration_of_another_layout_has_no_baseline(reader: MeterReader) -> None:
+    # Made for two dials, read with none: the fixed limits apply.
+    calibration = reader.calibrate(meter_frame(), layout())
+    frame = meter_frame("00627", ())
+    box = layout().digits.box(frame.size)
+    ImageDraw.Draw(frame).rectangle(box, fill=(255, 255, 255))
+    assert reader.read(frame, layout(dials=0), calibration).faults == (Fault.GLARE,)
+
+
+def test_reading_without_exposure_keeps_its_fault() -> None:
+    reading = Reading(1.0, 0.9)
+    assert reader_module._exposed(reading, None, 0.4) is reading
+
+
+def test_readings_offer_alternatives_near_a_carry(reader: MeterReader) -> None:
+    reading = reader.read(meter_frame("00629", (), roll=0.5), layout(dials=0))
+    assert reading.rejection is Rejection.AMBIGUOUS
+    assert reading.alternatives
+    assert {round(reading.candidate), *map(round, reading.alternatives)} >= {
+        620,
+        630,
+    }

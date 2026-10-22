@@ -7,9 +7,9 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from tarsius import BackendError
+from tarsius import BackendError, MeterDataError
 from tarsius.meter import Fault
-from tarsius.meter.engine import DIAL_GLARE_SHARE, Model, decode, exposure_fault
+from tarsius.meter.engine import Exposure, Model, decode, exposure_fault
 
 
 def _model(arch: list[dict[str, object]], arrays: dict[str, np.ndarray]) -> io.BytesIO:
@@ -104,8 +104,12 @@ def _crop(rng_seed: int = 2) -> np.ndarray:
     )
 
 
+def _exposure(crop: np.ndarray) -> Exposure:
+    return Exposure.of(crop)
+
+
 def test_exposure_ok_on_a_textured_crop() -> None:
-    assert exposure_fault(_crop()) is Fault.OK
+    assert exposure_fault(_exposure(_crop()), None, 0.5) is Fault.OK
 
 
 @pytest.mark.parametrize(
@@ -113,27 +117,55 @@ def test_exposure_ok_on_a_textured_crop() -> None:
 )
 def test_exposure_blank_crop(level: float, fault: Fault) -> None:
     crop = np.full((32, 20, 3), level, np.float32)
-    crop += np.random.default_rng(3).normal(0, 2, crop.shape).astype(np.float32)
-    assert exposure_fault(crop) is fault
+    crop += np.random.default_rng(3).normal(0, 1, crop.shape).astype(np.float32)
+    assert exposure_fault(_exposure(crop), None, 1.0) is fault
 
 
-def test_exposure_clipped_share() -> None:
+def test_exposure_blank_against_the_calibration() -> None:
+    baseline = Exposure(spread=60.0, light=0.3, level=90.0)
+    faint = Exposure(spread=10.0, light=0.3, level=90.0)
+    assert exposure_fault(faint, None, 1.0) is Fault.OK
+    assert exposure_fault(faint, baseline, 1.0) is Fault.DARK
+
+
+def test_exposure_clipped_share_without_calibration() -> None:
     crop = _crop()
     crop[:14] = 255.0
-    assert exposure_fault(crop) is Fault.GLARE
-    # Dial faces are white: the same share is normal there.
-    assert exposure_fault(crop, glare_share=DIAL_GLARE_SHARE) is Fault.OK
+    exposure = _exposure(crop)
+    # A sure reading of a clipped crop stands, an unsure one is glare.
+    assert exposure_fault(exposure, None, 0.9) is Fault.OK
+    assert exposure_fault(exposure, None, 0.6) is Fault.GLARE
 
 
 def test_exposure_dark_share() -> None:
     crop = _crop()
     crop[:26] = 0.0
-    assert exposure_fault(crop) is Fault.DARK
+    exposure = _exposure(crop)
+    assert exposure_fault(exposure, None, 0.9) is Fault.OK
+    assert exposure_fault(exposure, None, 0.6) is Fault.DARK
+    assert exposure_fault(exposure, _exposure(_crop()), 0.6) is Fault.DARK
 
 
-def test_exposure_fault_overrides_the_fault_head() -> None:
+def test_glare_against_the_calibration() -> None:
+    dark_drum = Exposure(spread=60.0, white=0.02, light=0.25, level=70.0)
+    blob = Exposure(spread=90.0, white=0.45, light=0.6, level=150.0)
+    assert exposure_fault(blob, dark_drum, 0.95) is Fault.GLARE
+    # An overexposed light drum clips its background, its digits stay.
+    light_drum = Exposure(spread=60.0, white=0.1, light=0.8, level=200.0)
+    clipped = Exposure(spread=70.0, white=0.75, light=0.82, level=220.0)
+    assert exposure_fault(clipped, light_drum, 0.95) is Fault.OK
+
+
+def test_exposure_values_are_checked() -> None:
+    with pytest.raises(MeterDataError, match="white"):
+        Exposure(white=1.5)
+    with pytest.raises(MeterDataError, match="spread"):
+        Exposure(spread=float("nan"))
+
+
+def test_inspect_reports_the_exposure() -> None:
     model = Model.load(_skip_model(100))
     blank = np.full((4, 4, 3), 250.0, np.float32)
     reading = model.inspect(blank)
-    assert reading.fault is Fault.GLARE
-    assert 0 <= reading.value < 10
+    assert reading.exposure == Exposure(0.0, 1.0, 0.0, 1.0, 250.0)
+    assert reading.fault is Fault.OK

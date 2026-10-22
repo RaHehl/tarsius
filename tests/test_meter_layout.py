@@ -7,6 +7,7 @@ import pytest
 
 from tarsius import MeterDataError, Roi, RoiError
 from tarsius.meter import Calibration, Dial, MeterLayout, Raster
+from tarsius.meter.engine import Exposure
 
 WINDOW = Roi.from_percent(45, 13, 78, 28)
 DIAL = [0.1, 0.1, 0.2, 0.2]
@@ -166,3 +167,35 @@ def test_calibration_dict_must_be_a_mapping() -> None:
 def test_calibration_needs_a_raster() -> None:
     with pytest.raises(MeterDataError, match="raster must be a Raster"):
         Calibration((0.0, 1.0, 1.0))  # type: ignore[arg-type]
+
+
+def test_calibration_with_exposure_round_trip() -> None:
+    calibration = Calibration(
+        exposure=(
+            Exposure(20.0, 0.0, 0.1, 0.3, 90.0),
+            Exposure(30.0, 0.2, 0.0, 0.9, 210.0),
+        )
+    )
+    restored = Calibration.from_dict(json.loads(json.dumps(calibration.as_dict())))
+    assert restored == calibration
+
+
+@pytest.mark.parametrize(
+    ("exposure", "match"),
+    [
+        ("abc", "exposure must be a list"),
+        (["abc"], "lists of 5 numbers"),
+        ([[1, 2, 3]], "lists of 5 numbers"),
+        ([[1, 0.5, 0, 2.0, 100]], "light"),
+        ([[-1, 0.5, 0, 0.5, 100]], "spread"),
+    ],
+)
+def test_calibration_exposure_is_checked(exposure: Any, match: str) -> None:
+    data = Calibration().as_dict() | {"exposure": exposure}
+    with pytest.raises(MeterDataError, match=match):
+        Calibration.from_dict(data)
+
+
+def test_calibration_exposure_items_are_exposures() -> None:
+    with pytest.raises(MeterDataError, match="exposure must be Exposure"):
+        Calibration(exposure=([1, 2, 3, 4, 5],))  # type: ignore[arg-type]

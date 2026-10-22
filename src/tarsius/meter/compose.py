@@ -42,19 +42,31 @@ class Composition:
     residual: float
     # An upper wheel fits two digits about equally well, near a carry.
     ambiguous: bool = False
+    # Other values the positions allow when upper wheels are read the other
+    # way, coupled instead of jumped or back, as (value, residual), best
+    # first. Near a carry, or with a reader biased by a tenth of a digit,
+    # one of them can be the right one; Plausibility picks it by the last
+    # value.
+    alternatives: tuple[tuple[float, float], ...] = ()
 
 
-def compose(wheels: Sequence[float], dials: Sequence[float] = ()) -> Composition:
+# At most this many alternatives are searched; each upper wheel near a carry
+# doubles them.
+MAX_ALTERNATIVES = 64
+
+
+def compose(
+    wheels: Sequence[float], dials: Sequence[float] = (), *, max_residual: float = 0.5
+) -> Composition:
     """
     Compose positions, most significant first, into one value.
 
     ``wheels`` are the wheel positions (0 to below 10), ``dials`` the pointer
     positions below them, dial k counting 10^-(k+1) units. The fraction of
     the least significant element is kept: it is real information on a
-    rolling wheel or dial.
+    rolling wheel or dial. Alternatives above ``max_residual`` are left out.
     """
     residual = 0.0
-    ambiguous = False
     # Value of everything below the current element, in its own digit units.
     below = 0.0
     fraction = 0.0
@@ -75,24 +87,58 @@ def compose(wheels: Sequence[float], dials: Sequence[float] = ()) -> Composition
         below = position
     else:
         below = fraction * 10.0
-    for index, position in enumerate(rest):
-        coupled = round(position - below / 10.0) % 10
-        coupled_error = circular_distance(position, coupled + below / 10.0)
-        if dials and index == 0:
-            # The wheel above the dials is geared to them, it cannot jump.
-            digit, below, error = coupled, coupled + below / 10.0, coupled_error
-        else:
-            jumped = round(position) % 10
-            jumped_error = circular_distance(position, jumped)
-            if coupled_error <= jumped_error:
-                digit, below, error = coupled, coupled + below / 10.0, coupled_error
-            else:
-                digit, below, error = jumped, float(jumped), jumped_error
-            if coupled != jumped and abs(coupled_error - jumped_error) < AMBIGUITY:
+    # The wheel above the dials is geared to them, it cannot jump.
+    forced = 1 if dials else 0
+    ambiguous = False
+    # Depth-first over both readings of each upper wheel; the first choice
+    # each time gives the composed value itself.
+    found: list[tuple[float, float]] = []
+    stack = [(0, below, tuple(digits), residual)]
+    while stack and len(found) <= MAX_ALTERNATIVES:
+        index, below, path, worst = stack.pop()
+        if index == len(rest):
+            found.append((_number(path) + fraction, worst))
+            continue
+        options = _options(rest[index], below, forced=index < forced)
+        if not found and len(options) == 2:
+            (first, _, error), (second, _, other) = options
+            if first != second and abs(error - other) < AMBIGUITY:
                 ambiguous = True
-        residual = max(residual, error)
-        digits.append(digit)
+        # Pushed in reverse, so the first choice is explored first.
+        for digit, next_below, error in reversed(options):
+            # The composed value itself is followed whatever its residual.
+            primary = not found and (digit, next_below, error) == options[0]
+            if primary or max(worst, error) <= max_residual:
+                stack.append((index + 1, next_below, (*path, digit), max(worst, error)))
+    value, residual = found[0]
+    alternatives = sorted(
+        {(v, r) for v, r in found[1:] if v != value},
+        key=lambda item: (item[1], item[0]),
+    )
+    return Composition(value, residual, ambiguous, tuple(alternatives))
+
+
+def _options(
+    position: float, below: float, *, forced: bool
+) -> list[tuple[int, float, float]]:
+    """Return (digit, below for the next wheel, error), the better fit first."""
+    coupled = round(position - below / 10.0) % 10
+    coupled_error = circular_distance(position, coupled + below / 10.0)
+    coupled_option = (coupled, coupled + below / 10.0, coupled_error)
+    if forced:
+        return [coupled_option]
+    jumped = round(position) % 10
+    jumped_option = (jumped, float(jumped), circular_distance(position, jumped))
+    if coupled == jumped:
+        # Same digit either way; the better fit sets what the next wheel sees.
+        return [min(coupled_option, jumped_option, key=lambda o: o[2])]
+    if coupled_error <= jumped_option[2]:
+        return [coupled_option, jumped_option]
+    return [jumped_option, coupled_option]
+
+
+def _number(digits: Sequence[int]) -> int:
     whole = 0
     for digit in reversed(digits):
         whole = whole * 10 + digit
-    return Composition(whole + fraction, residual, ambiguous)
+    return whole

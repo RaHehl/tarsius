@@ -10,15 +10,24 @@ from enum import StrEnum
 from importlib.resources import files
 
 import numpy as np
+import numpy.typing as npt
 from PIL import Image
 
 from ..errors import BackendError, MeterDataError
 from . import checks
 from .compose import compose
-from .engine import DIAL_GLARE_SHARE, Fault, Model, Reading
+from .engine import (
+    DIAL_GLARE_SHARE,
+    GLARE_SHARE,
+    Exposure,
+    Fault,
+    Model,
+    Reading,
+    exposure_fault,
+)
 from .frame import crop, decode_frame
 from .layout import MeterLayout
-from .strip import Calibration, calibrate, cells, read_cells
+from .strip import Calibration, calibrate, cells, median_exposure, pixels
 
 DIGITS_MODEL = "digits.npz"
 DIALS_MODEL = "dials.npz"
@@ -64,6 +73,9 @@ class MeterReading:
     resolution: float
     wheels: tuple[Reading, ...] = ()
     dials: tuple[Reading, ...] = ()
+    # Other values the wheels allow near a carry, best fit first, within
+    # max_residual; Plausibility picks the one that fits the last value.
+    alternatives: tuple[float, ...] = ()
 
     @property
     def accepted(self) -> bool:
@@ -158,11 +170,22 @@ class MeterReader:
         frames = [images] if isinstance(images, bytes | Image.Image) else images
         if not frames:
             raise ValueError("calibration needs at least one frame")
-        windows = [
-            crop(decode_frame(frame), layout.digits, layout.rotation)
-            for frame in frames
+        decoded = [decode_frame(frame) for frame in frames]
+        windows = [crop(f, layout.digits, layout.rotation) for f in decoded]
+        model = _SHARED.get(DIGITS_MODEL)
+        calibration = calibrate(model, windows, layout.wheels)
+        # What each wheel and dial looks like now, to tell glare from a drum.
+        samples = [
+            [
+                Exposure.of(p)
+                for p in (
+                    *self._wheel_pixels(window, layout, calibration),
+                    *self._dial_pixels(frame, layout, calibration),
+                )
+            ]
+            for frame, window in zip(decoded, windows, strict=True)
         ]
-        return calibrate(_SHARED.get(DIGITS_MODEL), windows, layout.wheels)
+        return dataclasses.replace(calibration, exposure=median_exposure(samples))
 
     def read(
         self,
@@ -175,38 +198,62 @@ class MeterReader:
 
         Raises ImageError for undecodable data, BlankFrameError for a frame
         that shows nothing and BackendError if a reader cannot load. Without
-        ``calibration`` the window is cut into equal cells, upright.
+        ``calibration`` the window is cut into equal cells, upright, and
+        exposure faults use fixed limits instead of the calibrated look.
         """
         calibration = calibration or Calibration()
         frame = decode_frame(image)
         window = crop(frame, layout.digits, layout.rotation)
-        if calibration.upside_down:
-            window = window.rotate(180)
-        wheels = read_cells(
-            _SHARED.get(DIGITS_MODEL),
-            cells(window, layout.wheels, calibration.raster),
-            views=self._views,
-        )
+        digits = _SHARED.get(DIGITS_MODEL)
+        wheels = [
+            digits.inspect(p, views=self._views)
+            for p in self._wheel_pixels(window, layout, calibration)
+        ]
         dials: list[Reading] = []
         if layout.dials:
             model = _SHARED.get(DIALS_MODEL)
-            h, w = model.input_hw
-            for dial in layout.dials:
-                face = crop(frame, dial.roi, layout.rotation)
-                if calibration.upside_down:
-                    face = face.rotate(180)
-                if dial.counterclockwise:
-                    # A counter-clockwise dial is the mirror of a clockwise one.
-                    face = face.transpose(Image.Transpose.FLIP_LEFT_RIGHT)
-                pixels = np.asarray(
-                    face.resize((w, h), Image.Resampling.BILINEAR), np.float32
-                )
-                dials.append(
-                    model.inspect(
-                        pixels, views=self._views, glare_share=DIAL_GLARE_SHARE
-                    )
-                )
-        return self._judge(layout, tuple(wheels), tuple(dials))
+            dials = [
+                model.inspect(p, views=self._views)
+                for p in self._dial_pixels(frame, layout, calibration)
+            ]
+        baseline: tuple[Exposure | None, ...] = calibration.exposure
+        if len(baseline) != layout.wheels + len(layout.dials):
+            baseline = (None,) * (layout.wheels + len(layout.dials))
+        shares = (GLARE_SHARE,) * layout.wheels + (DIAL_GLARE_SHARE,) * len(dials)
+        checked = [
+            _exposed(r, base, share)
+            for r, base, share in zip((*wheels, *dials), baseline, shares, strict=True)
+        ]
+        return self._judge(
+            layout, tuple(checked[: layout.wheels]), tuple(checked[layout.wheels :])
+        )
+
+    @staticmethod
+    def _wheel_pixels(
+        window: Image.Image, layout: MeterLayout, calibration: Calibration
+    ) -> list[npt.NDArray[np.float32]]:
+        if calibration.upside_down:
+            window = window.rotate(180)
+        hw = _SHARED.get(DIGITS_MODEL).input_hw
+        return [pixels(c, hw) for c in cells(window, layout.wheels, calibration.raster)]
+
+    @staticmethod
+    def _dial_pixels(
+        frame: Image.Image, layout: MeterLayout, calibration: Calibration
+    ) -> list[npt.NDArray[np.float32]]:
+        if not layout.dials:
+            return []
+        hw = _SHARED.get(DIALS_MODEL).input_hw
+        out = []
+        for dial in layout.dials:
+            face = crop(frame, dial.roi, layout.rotation)
+            if calibration.upside_down:
+                face = face.rotate(180)
+            if dial.counterclockwise:
+                # A counter-clockwise dial is the mirror of a clockwise one.
+                face = face.transpose(Image.Transpose.FLIP_LEFT_RIGHT)
+            out.append(pixels(face, hw))
+        return out
 
     def _judge(
         self,
@@ -214,9 +261,17 @@ class MeterReader:
         wheels: tuple[Reading, ...],
         dials: tuple[Reading, ...],
     ) -> MeterReading:
-        composition = compose([r.value for r in wheels], [r.value for r in dials])
+        composition = compose(
+            [r.value for r in wheels],
+            [r.value for r in dials],
+            max_residual=self._max_residual,
+        )
         scale = 10**layout.decimal_wheels
         candidate = round(composition.value / scale, layout.decimals + 1)
+        alternatives = tuple(
+            round(value / scale, layout.decimals + 1)
+            for value, _ in composition.alternatives
+        )
         resolution = 10.0**-layout.decimals
         confidence = min(r.confidence for r in (*wheels, *dials))
         reading = MeterReading(
@@ -228,6 +283,7 @@ class MeterReader:
             resolution,
             wheels,
             dials,
+            alternatives,
         )
         if reading.faults:
             return reading.rejected(Rejection.FAULT)
@@ -238,3 +294,17 @@ class MeterReader:
         if composition.ambiguous:
             return reading.rejected(Rejection.AMBIGUOUS)
         return reading
+
+
+def _exposed(
+    reading: Reading, baseline: Exposure | None, glare_share: float
+) -> Reading:
+    """Return the reading with the fault its raw exposure shows, if any."""
+    if reading.exposure is None:
+        return reading
+    fault = exposure_fault(
+        reading.exposure, baseline, reading.confidence, glare_share=glare_share
+    )
+    if fault is Fault.OK:
+        return reading
+    return dataclasses.replace(reading, fault=fault)
