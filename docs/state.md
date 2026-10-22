@@ -1,0 +1,15 @@
+# State detection: details
+
+The README shows how to use `StateDetector`. This page explains the details.
+
+## Probabilities, stored references and errors
+
+`probabilities` is a softmax of the per-state scores with a temperature per backend, fitted by `scripts/calibrate.py` on the week before the test week of the history below. Only the harder camera had both states in that week, so the fit rests on its 142 frames. The test week has 284 frames, each classified with 15 sets of references (1, 2 and 5 segments per state, 5 seeds each). Of those answers ncnn gives 0.9 or more to 97 %, all of them right, with a calibration error of 0.009. edges gives 0.9 or more to 79 %. With one segment per state the estimates are slightly too sure, ncnn erred at up to 0.85. With more references they are rather too cautious, edges clearly. The status comes from the margin, not from the probabilities: with two states, unsure means below 0.67 for ncnn. A blank region gets the same probability for every state, a detector that is not ready gives none.
+
+After a restart, hand the stored originals back with `detector.load([(key, original, state), ...], caches={key: cache, ...})`. A cache spares the extraction, about 14 ms per reference on an i5-8400T, one reference is still extracted to check that the cached ones fit the backend. A cache made for another region, `frame_side`, backend or release of tarsius, Pillow or ncnn is ignored and the reference is extracted again. A cache that is damaged or does not hold a unit vector is ignored too. `LoadReport.caches` holds only the new caches: store them, keep the others and drop those of skipped and evicted keys. Development builds all report version 0.0.0, so clear stored caches after changing tarsius code there. Unusable references (blank, undecodable, unknown state) are skipped and reported in the returned `LoadReport` instead of failing. `prepare()` and `classify()` raise `ImageError` for undecodable data and `BlankFrameError` when the frame shows nothing, for example a grey frame from an offline camera. `prepare()` also raises `BlankRegionError` (the base class) when the region has nothing to compare, `classify()` answers such a region as unsure, without a candidate. `tarsius.outline(frame, roi)` draws the region on a frame with the same box rule as the comparison.
+
+All methods block, and so does creating the first detector, which loads the model; call them in an executor. They are safe to call from several threads: changes are serialized and `classify()` never waits for them, only inferences on the shared backend take turns.
+
+## Backends
+
+`StateDetector` uses `NcnnBackend` unless you pass `backend=`. It loads one instance per process (about 20 MB) and shares it, inferences take turns on it. ncnn is a regular dependency. Since ncnn 1.0.20261020, `opencv-python` is an optional extra of ncnn, so tarsius installs on Alpine (musl) systems such as Home Assistant OS. Checked in `python:3.14-alpine` on x86_64 and aarch64. Both backends support Python 3.14 and 3.15.

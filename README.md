@@ -17,51 +17,54 @@
   <a href="https://github.com/j178/prek"><img src="https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/j178/prek/master/docs/assets/badge-v0.json" alt="prek"></a>
 </p>
 
-Local state detection for a region of a camera image: is the car in the garage, is the mailbox flag up, is the gate open. It also reads utility meters with counter wheels and pointer dials.
+Local image recognition for regions of a camera image:
 
-You confirm a few frames per state, tarsius compares new frames against them and answers with a state or "unsure". Nothing leaves the machine and nothing gets trained.
+- **State detection:** is the car in the garage, is the gate open, is the mailbox flag up.
+- **Meter reading:** water, gas and electricity meters with number wheels and pointer dials.
 
-## Why tarsius
+Everything runs on your machine, without a cloud service and without training on your frames.
 
-Tarsiers are small nocturnal primates whose eyes are each about as large as their brain. Lots of eye, little brain, and very good at seeing in the dark. That is the idea here too: no training on your frames, just careful looking, including at IR night frames. State detection compares against the frames you confirm; the meter reader ships small networks trained in advance.
+Tarsiers are small nocturnal primates whose eyes are each about as large as their brain: lots of eye, little brain, very good at seeing in the dark. That is the idea here too.
+
+## Install
+
+```sh
+pip install tarsius
+```
+
+Python 3.14 or newer. Works on Alpine (musl), so also in Home Assistant OS.
+
+## Detect a state
 
 ```python
 from tarsius import Roi, StateDetector
 
-# The detector picks the backend for the task; detector.backend_id tells which.
 detector = StateDetector(Roi.from_percent(10, 10, 60, 50), ("on", "off"))
 
-# Teaching: check the frame, store prepared.original and prepared.cache, add it.
-prepared = detector.prepare(car_jpeg)
-evicted = detector.add("ref-1", prepared, state="on")  # keys dropped by the cap
+# Teach a few frames per state.
+detector.add("ref-1", detector.prepare(car_jpeg), state="on")
 detector.add("ref-2", detector.prepare(empty_jpeg), state="off")
 
 result = detector.classify(new_jpeg)
-result.status  # Status.CONFIDENT, Status.UNSURE or Status.NOT_READY
+result.status  # CONFIDENT, UNSURE or NOT_READY
 result.state  # "on" or "off" when confident
 result.candidate  # best guess, also when unsure
-result.probabilities  # {"on": 0.97, "off": 0.03}, estimated from the scores
+result.probabilities  # {"on": 0.97, "off": 0.03}
 ```
 
-`probabilities` is a softmax of the per-state scores with a temperature per backend, fitted by `scripts/calibrate.py` on the week before the test week of the history below. Only the harder camera had both states in that week, so the fit rests on its 142 frames. The test week has 284 frames, each classified with 15 sets of references (1, 2 and 5 segments per state, 5 seeds each). Of those answers ncnn gives 0.9 or more to 97 %, all of them right, with a calibration error of 0.009. edges gives 0.9 or more to 79 %. With one segment per state the estimates are slightly too sure, ncnn erred at up to 0.85. With more references they are rather too cautious, edges clearly. The status comes from the margin, not from the probabilities: with two states, unsure means below 0.67 for ncnn. A blank region gets the same probability for every state, a detector that is not ready gives none.
+- You confirm a few frames per state. tarsius compares new frames against them and answers with a state, or "unsure" with its best guess.
+- Store `prepared.original` when you teach, and give it back with `detector.load(...)` after a restart.
+- A grey frame from an offline camera raises an error, an empty region answers "unsure".
+- All methods block. Call them in an executor; they are safe to use from several threads.
 
-After a restart, hand the stored originals back with `detector.load([(key, original, state), ...], caches={key: cache, ...})`. A cache spares the extraction, about 14 ms per reference on an i5-8400T, one reference is still extracted to check that the cached ones fit the backend. A cache made for another region, `frame_side`, backend or release of tarsius, Pillow or ncnn is ignored and the reference is extracted again. A cache that is damaged or does not hold a unit vector is ignored too. `LoadReport.caches` holds only the new caches: store them, keep the others and drop those of skipped and evicted keys. Development builds all report version 0.0.0, so clear stored caches after changing tarsius code there. Unusable references (blank, undecodable, unknown state) are skipped and reported in the returned `LoadReport` instead of failing. `prepare()` and `classify()` raise `ImageError` for undecodable data and `BlankFrameError` when the frame shows nothing, for example a grey frame from an offline camera. `prepare()` also raises `BlankRegionError` (the base class) when the region has nothing to compare, `classify()` answers such a region as unsure, without a candidate. `tarsius.outline(frame, roi)` draws the region on a frame with the same box rule as the comparison.
+Two backends compare the frames:
 
-All methods block, and so does creating the first detector, which loads the model; call them in an executor. They are safe to call from several threads: changes are serialized and `classify()` never waits for them, only inferences on the shared backend take turns.
+- `NcnnBackend` (default): image features on [ncnn](https://github.com/Tencent/ncnn). Tolerates clutter and changing light, a rough region is enough.
+- `EdgeBackend`: numpy only, a baseline that needs a tight region.
 
-## Backends
+### Results
 
-- `NcnnBackend`: SqueezeNet 1.1 ImageNet features on [ncnn](https://github.com/Tencent/ncnn). Tolerates clutter and lighting changes, a rough region is enough.
-- `EdgeBackend`: numpy only, a baseline. Needs a tight region that still shows some static structure when the object is gone.
-
-`StateDetector` uses `NcnnBackend` unless you pass `backend=`. It loads one instance per process (about 20 MB) and shares it, inferences take turns on it. ncnn is a regular dependency. Since ncnn 1.0.20261020, `opencv-python` is an optional extra of ncnn, so tarsius installs on Alpine (musl) systems such as Home Assistant OS. Checked in `python:3.14-alpine` on x86_64 and aarch64. Both backends support Python 3.14 and 3.15.
-
-## Results so far
-
-One household, two garage cameras, 24 days of recorded history, day and IR night.
-References come from older frames, the test is the newest week.
-The table is the harder camera: a dark car and clutter that gets moved around in front of it (459 frames, 164 in the test week).
-The other camera scores 100 % with both backends.
+One household, two garage cameras, 24 days, day and IR night. The table shows the harder camera (dark car, clutter that gets moved); the other one scores 100 % with both backends.
 
 | Backend | Region | 2 confirmed segments per state (about 10 frames) | 5 per state (about 25 frames) |
 |---|---|---|---|
@@ -70,12 +73,11 @@ The other camera scores 100 % with both backends.
 | edges | tight | 1.8 % wrong, 3.5 % unsure | 0.1 % wrong, 1.7 % unsure |
 | edges | wide, with clutter | 27 % wrong, 7.4 % unsure | 20 % wrong, 8.8 % unsure |
 
-About 30 ms per 4 MP frame with edges and 36 ms with ncnn, including JPEG decoding, on one thread of an Intel i5-8400T.
-A small sample, not a guarantee. `scripts/history_split.py` runs the same evaluation with `StateDetector` on your own recordings. It also reports how often the detector would ask when unsure answers are confirmed.
+About 36 ms per 4 MP frame with ncnn on one thread of an Intel i5-8400T. A small sample, not a guarantee: `scripts/history_split.py` runs the same test on your own recordings.
 
-## Reading meters
+[docs/state.md](docs/state.md) covers probabilities, stored references and errors in detail.
 
-`tarsius.meter` reads utility meters with counter wheels and optional pointer dials. You give the regions once, it reads a value from each frame and says why when it will not.
+## Read a meter
 
 ```python
 from tarsius import Roi
@@ -103,26 +105,18 @@ reading = guard.review(reading, at=now)  # may add DECREASED, TOO_FAST, ...
 store(guard.state.as_dict())  # and pass state=PlausibilityState.from_dict(...)
 ```
 
-Wheels and dials are combined with the carry rule, not just concatenated, so a rolling wheel between two digits reads right. A reading comes back rejected with a reason when a wheel is covered, blank or glared, when the reader is unsure, or when the wheels contradict each other.
+- Wheels and dials are combined with the carry rule, so a wheel rolling between two digits reads right.
+- A reading is rejected with a reason when a wheel is covered or glared, when the reader is unsure, or when the wheels contradict each other.
+- `Plausibility` checks each reading against the last value a user confirmed: it never goes down, rises at most `max_rate` per hour, and asks the user when readings keep disagreeing.
+- Run `calibrate()` once at setup; a reading then takes about 18 ms.
 
-`Plausibility` checks every reading against the last accepted value, which a user confirms once:
+On one water meter with five wheels and four dials, 99.7 % of 696 frames read within 0.01 m³. That is one meter, not a guarantee for others.
 
-- it never goes down and rises at most `max_rate` units per hour (4 by default, for household water in m³);
-- near a carry it picks the reading that fits the last value;
-- an unsure jump of a whole step waits for a second reading;
-- readings that keep disagreeing for six hours raise `guard.dispute`, so the user can confirm the value.
+The models were trained by the author on generated meters and the Word-Wheel Water Meter Dataset (Zhao et al., Dryad, CC0-1.0, [doi:10.5061/dryad.7d7wm3860](https://doi.org/10.5061/dryad.7d7wm3860)), with thanks to its authors.
 
-Run `calibrate()` at setup and after the camera moved; a read then takes about 18 ms. Store the layout, the calibration and `guard.state` as dicts.
+[docs/meter.md](docs/meter.md) covers the carry rule, the checks and calibration in detail.
 
-On one water meter with five wheels and four dials, 99.7 % of 696 frames read within 0.01 m³ of an existing reader on the same camera. That is one meter, not a guarantee for others.
-
-The models were trained by the author on generated meters and the training split of the Word-Wheel Water Meter Dataset (Zhao et al., Dryad, CC0-1.0, [doi:10.5061/dryad.7d7wm3860](https://doi.org/10.5061/dryad.7d7wm3860)), with thanks to its authors. See `src/tarsius/meter/models/MODELS.md`.
-
-[docs/meter.md](docs/meter.md) explains the carry rule, the checks, faults and calibration in detail.
-
-### Finding the regions (alpha)
-
-`tarsius.meter.finder` is **alpha**: suggestions, API and models may change in any release, and it emits `AlphaWarning` on first use. It suggests the regions to start from and never reads a value itself.
+### Suggest the regions (alpha)
 
 ```python
 from tarsius.meter.finder import suggest
@@ -131,7 +125,7 @@ suggestion = suggest(jpeg)  # rotation, digits, dials, scores
 layout = suggestion.layout(wheels=5)  # check it with the user
 ```
 
-On a straight-on photo of one meter it usually finds the counter and the dials, but it can miss them or mark a serial number or type label instead, and the dial order is a guess. Run it at setup, not per reading.
+On a straight-on photo of one meter it usually finds the counter and the dials, but it can miss them or mark a serial number instead. Always let the user check the suggestion. **Alpha:** results and API may change in any release.
 
 ## Development
 
