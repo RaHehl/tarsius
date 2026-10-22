@@ -124,6 +124,23 @@ One meter, so this says the pipeline works on it, not how well it carries over t
 
 The models were trained by the author on generated meters and the training split of the Word-Wheel Water Meter Dataset (Zhao et al., Dryad, CC0-1.0, [doi:10.5061/dryad.7d7wm3860](https://doi.org/10.5061/dryad.7d7wm3860)), with thanks to its authors. See `src/tarsius/meter/models/MODELS.md`.
 
+### Finding the regions (alpha)
+
+`tarsius.meter.finder` is **alpha**: suggestions, API and models may change in any release, and it emits `AlphaWarning` on first use. It suggests the regions to start from and never reads a value itself.
+
+```python
+from tarsius.meter.finder import suggest
+
+suggestion = suggest(jpeg)  # rotation, digits, dials, scores
+layout = suggestion.layout(wheels=5)  # check it with the user
+```
+
+Two segmentation networks on ncnn mark the counter window (181k parameters) and the dials (676k). The window's rotated rectangle gives `rotation`, the dials are separated as discs in their mask and ordered clockwise from twelve o'clock, which is a guess the user has to check. The window may come out upside down, `calibrate()` sorts that out.
+
+On the meter above it found the window on 33 of 35 frames sampled over two days. On the other two it picked the vertical serial number on the housing ring, the mistake earlier versions made on both photos of this European meter they were tried on: the training photographs are Chinese meters without such a number. Show the suggestion to the user. It found all four dials on 31 of the 35 frames and three on the rest. Reading the 696 frames with the regions suggested on the first one gave the same 99.7 % within 0.01 m³.
+
+Both networks together take about 50 ms on one thread of the i5-8400T. Estimated from the operation count, a Home Assistant Green needs up to 1 s for the window and 3.7 s for the dials. Run it at setup or once a day, not per reading.
+
 ## Development
 
 ```sh
@@ -135,7 +152,7 @@ uvx prek run --all-files
 
 The SqueezeNet model is not stored in git. `scripts/build_model.sh` converts the original SqueezeNet 1.1 release with the ncnn tools. Inputs and outputs are checked against pinned sha256 sums, so CI and a local run produce the same files. It needs x86_64 Linux with `curl`, `unzip`, `libgomp1` and `libprotobuf32t64` (Ubuntu 24.04).
 
-The meter models are stored in git with their sha256 sums, since their training outputs are not public. See `src/tarsius/meter/models/MODELS.md`.
+The meter models are stored in git with their sha256 sums, since their training outputs are not public. `scripts/build_meter_models.sh` reproduces them from those outputs and `scripts/meter_finder_parity.py` compares the converted finders with Keras, see `src/tarsius/meter/models/MODELS.md`.
 
 Releases: every PR gets a label, Release Drafter collects them into a draft, publishing the GitHub release builds and uploads to PyPI.
 

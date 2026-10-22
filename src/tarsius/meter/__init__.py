@@ -4,7 +4,7 @@ Read utility meters: counter wheels and pointer dials in a camera frame.
 The caller gives the regions (:class:`MeterLayout`), :class:`MeterReader`
 reads them with small bundled numpy networks and composes the value with the
 carry rule, :class:`Plausibility` rejects values that go backwards or rise
-too fast.
+too fast. ``tarsius.meter.finder`` can suggest the regions; it is alpha.
 """
 
 from .compose import Composition, compose
