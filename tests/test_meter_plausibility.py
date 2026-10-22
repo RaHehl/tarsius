@@ -629,3 +629,12 @@ def test_higher_alternative_measured_against_its_own_wheel() -> None:
     guard = _guard(123.456)
     reading = MeterReading(113.5, 113.5, None, 0.9, 0.1, 0.001, (), (), (123.5,))
     assert guard.review(reading, T0 + 5 * MINUTE).value == 123.5
+
+
+def test_jitter_within_the_tolerance_keeps_where_the_value_came_from() -> None:
+    guard = _guard(668.4, tolerance=0.001)
+    guard.review(_meter(658.45, 668.45), T0 + 5 * MINUTE)
+    guard.review(_meter(668.4495), T0 + 10 * MINUTE)
+    assert guard.state is not None
+    assert guard.state.value == 668.45
+    assert guard.state.offset == pytest.approx(10.0)
