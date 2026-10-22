@@ -11,7 +11,7 @@ from .compose import Composition, compose
 from .engine import Exposure, Fault, Reading
 from .frame import METER_FRAME_SIDE
 from .layout import Dial, MeterLayout
-from .plausibility import Plausibility, PlausibilityState
+from .plausibility import Dispute, Plausibility, PlausibilityState
 from .reader import MeterReader, MeterReading, Rejection
 from .strip import Calibration, Raster
 
@@ -20,6 +20,7 @@ __all__ = [
     "Calibration",
     "Composition",
     "Dial",
+    "Dispute",
     "Exposure",
     "Fault",
     "MeterLayout",
