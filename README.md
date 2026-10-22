@@ -142,7 +142,7 @@ layout = suggestion.layout(wheels=5)  # check it with the user
 
 Two segmentation networks on ncnn mark the counter window (181k parameters) and the dials (676k). The window's rotated rectangle gives `rotation`, the dials are separated as discs in their mask and ordered clockwise from twelve o'clock, which is a guess the user has to check. The window may come out upside down, `calibrate()` sorts that out.
 
-On the meter above it found the window on 33 of 35 frames sampled over two days. On the other two it picked the vertical serial number on the housing ring, the mistake earlier versions made on both photos of this European meter they were tried on: the training photographs are Chinese meters without such a number. Show the suggestion to the user. It found all four dials on 31 of the 35 frames and three on the rest. Reading the 696 frames with the regions suggested on the first one gave the same 99.7 % within 0.01 m³.
+The window network also marks the vertical serial number on the housing ring of this European meter (the training photographs are Chinese meters without one). Of the two blobs the finder keeps the one the network is surer of, not the larger: that found the window on all 735 frames of the meter above, and on all of them desaturated; keeping the larger one found it on 95 % and 6 %. Show the suggestion to the user. It found all four dials on 31 of the 35 frames and three on the rest. Reading the 696 frames with the regions suggested on the first one gave the same 99.7 % within 0.01 m³.
 
 Both networks together take about 50 ms on one thread of the i5-8400T. Estimated from the operation count, a Home Assistant Green needs up to 1 s for the window and 3.7 s for the dials. Run it at setup or once a day, not per reading.
 

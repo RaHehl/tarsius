@@ -110,12 +110,28 @@ def test_rotated_points_match_rotated_crops() -> None:
     assert (xs.mean(), ys.mean()) == pytest.approx((x, y), abs=1.0)
 
 
-def test_largest_component() -> None:
-    mask = np.zeros((10, 10), bool)
-    mask[1:3, 1:3] = True
-    mask[5:9, 5:9] = True
-    assert finder._largest(mask).sum() == 16
-    assert not finder._largest(np.zeros((4, 4), bool)).any()
+def test_strongest_component_wins_over_a_larger_one() -> None:
+    # A large, weaker blob (a serial number) and a smaller, surer window.
+    probs = np.zeros((20, 20), np.float32)
+    probs[1:13, 1:5] = 0.8
+    probs[15:18, 8:18] = 0.95
+    chosen = finder._strongest(probs > 0.5, probs)
+    assert chosen.sum() == 30
+    assert chosen[16, 10]
+
+
+def test_strongest_component_breaks_ties_by_area() -> None:
+    probs = np.zeros((20, 20), np.float32)
+    probs[1:4, 1:4] = 0.9
+    probs[10:14, 10:14] = 0.9
+    assert finder._strongest(probs > 0.5, probs).sum() == 16
+
+
+def test_tiny_components_are_noise() -> None:
+    probs = np.zeros((10, 10), np.float32)
+    probs[1:3, 1:3] = 0.99
+    assert not finder._strongest(probs > 0.5, probs).any()
+    assert not finder._strongest(np.zeros((4, 4), bool), probs[:4, :4]).any()
 
 
 def test_touching_discs_are_separated() -> None:

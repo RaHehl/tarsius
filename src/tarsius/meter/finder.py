@@ -10,12 +10,12 @@ Dryad word-wheel water meter photographs: one marks the counter window, one
 marks the pointer dials. The window's rotated rectangle gives the rotation
 that makes it horizontal, the dials are found as discs in the dial mask.
 
-Known weakness: trained mostly on one population of meters, it can mark a
-printed serial number instead of the counter. On a European meter with a
-vertical serial number on the housing ring, earlier models marked the serial
-number on both photographs tried; the bundled one found the window on 33 of
-35 frames of that meter and the serial number on the other two. Show the
-suggestion to the user.
+Known weakness: trained mostly on one population of meters, it also marks
+a printed serial number. On a European meter with a vertical serial number
+on the housing ring both are strong blobs; the window is the one the
+network is surer of, so that one is kept rather than the larger one. That
+found the window on all 735 frames of that meter, also desaturated. Show
+the suggestion to the user.
 
 Takes about 50 ms on one thread of an i5-8400T. Estimated from the
 operation count, a Home Assistant Green needs up to 1 s for the window and
@@ -172,10 +172,11 @@ def suggest(image: bytes | Image.Image, *, dials: bool = True) -> Suggestion:
 def _window(frame: Image.Image) -> tuple[float, Roi | None, float]:
     """Return rotation, window region and score from the window mask."""
     logits = _NETS[_WINDOW_MODEL].logits(frame)
-    blob = _largest(logits > 0)
-    if blob.sum() < 8:
+    probs: Floats = (1 / (1 + np.exp(-logits))).astype(np.float32)
+    blob = _strongest(logits > 0, probs)
+    if not blob.any():
         return 0.0, None, 0.0
-    score = float(np.mean(1 / (1 + np.exp(-logits[blob]))))
+    score = float(np.mean(probs[blob]))
     width, height = frame.size
     rows, cols = logits.shape
     ys, xs = np.nonzero(blob)
@@ -302,10 +303,36 @@ def _distance(mask: Mask) -> Floats:
     return depth
 
 
-def _largest(mask: Mask) -> Mask:
-    """Return the largest 4-connected component of a mask."""
+# Components smaller than this many mask cells are noise, not a window.
+MIN_CELLS = 8
+
+
+def _strongest(mask: Mask, probs: Floats) -> Mask:
+    """
+    Return the 4-connected component the network is surest of, by mean.
+
+    On a European meter the vertical serial number is a second strong
+    blob, and which of the two is larger depends on light and colour: on
+    desaturated frames the window was the larger one only a third of the
+    time. The window had the higher mean in all frames. Area breaks ties;
+    components under MIN_CELLS cells are left out.
+    """
     if not mask.any():
         return mask
+    labels = _labels(mask)
+    counts = np.bincount(labels[mask])
+    sums = np.bincount(labels[mask], weights=probs[mask])
+    best, key = -1, (0.0, 0)
+    for label in np.flatnonzero(counts >= MIN_CELLS):
+        candidate = (float(sums[label] / counts[label]), int(counts[label]))
+        if candidate > key:
+            best, key = int(label), candidate
+    strongest: Mask = labels == best
+    return strongest
+
+
+def _labels(mask: Mask) -> npt.NDArray[np.int64]:
+    """Label the 4-connected components of a mask; background gets mask.size."""
     size = mask.size
     labels = np.where(mask, np.arange(size).reshape(mask.shape), size)
     while True:
@@ -321,11 +348,8 @@ def _largest(mask: Mask) -> Mask:
         )
         spread = np.where(mask, spread, size)
         if np.array_equal(spread, labels):
-            break
+            return spread
         labels = spread
-    counts = np.bincount(labels[mask])
-    largest: Mask = labels == int(np.argmax(counts))
-    return largest
 
 
 def _to_rotated(
