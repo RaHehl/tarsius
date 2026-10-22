@@ -33,6 +33,9 @@ MISREAD_SHARE = 0.02
 HOLD_UNITS = 5
 # Misreads followed at once.
 MAX_MISREADS = 4
+# A rise of a whole step from a reading less sure than this waits for a
+# second reading that agrees: red wheels confused 3 for 6 at 0.5 to 0.77.
+CORROBORATE_BELOW = 0.7
 # Lower readings that only a misread explains, for this long and this often,
 # are a dispute the user should settle: the meter or the last value is wrong.
 DISPUTE_AFTER = timedelta(hours=6)
@@ -118,6 +121,8 @@ class PlausibilityState:
     # Misreads followed, (offset, latest such reading, its time).
     misreads: tuple[tuple[float, float, datetime], ...] = ()
     dispute: Dispute | None = None
+    # An unsure rise of a step or more waiting for a reading to agree.
+    jump: tuple[float, datetime] | None = None
 
     def __post_init__(self) -> None:
         """Reject values no review produces; raises MeterDataError."""
@@ -140,6 +145,11 @@ class PlausibilityState:
                 raise MeterDataError("misread offsets must be positive")
             checks.number(misread[1], "misread value")
             checks.aware(misread[2], "misread time")
+        if self.jump is not None:
+            if not isinstance(self.jump, tuple) or len(self.jump) != 2:
+                raise MeterDataError(f"jump must be (value, time), got {self.jump!r}")
+            checks.number(self.jump[0], "jump value")
+            checks.aware(self.jump[1], "jump time")
         if self.dispute is not None and not isinstance(self.dispute, Dispute):
             raise MeterDataError(f"dispute must be a Dispute, got {self.dispute!r}")
 
@@ -154,6 +164,9 @@ class PlausibilityState:
                 [offset, value, at.isoformat()] for offset, value, at in self.misreads
             ],
             "dispute": None if self.dispute is None else self.dispute.as_dict(),
+            "jump": None
+            if self.jump is None
+            else [self.jump[0], self.jump[1].isoformat()],
         }
 
     @classmethod
@@ -178,6 +191,12 @@ class PlausibilityState:
                     (triple[0], triple[1], _time(triple[2], "misread time"))
                 )
             dispute = data.get("dispute")
+            jump = data.get("jump")
+            if jump is not None:
+                pair = _list(jump, "jump")
+                if len(pair) != 2:
+                    raise MeterDataError(f"jump must be (value, time), got {jump!r}")
+                jump = (pair[0], _time(pair[1], "jump time"))
             return cls(
                 data["value"],
                 _time(data["at"], "at"),
@@ -185,6 +204,7 @@ class PlausibilityState:
                 tuple(pending),
                 tuple(misreads),
                 None if dispute is None else Dispute.from_dict(dispute),
+                jump,
             )
         except KeyError as err:
             raise MeterDataError(f"invalid plausibility state: missing {err}") from err
@@ -316,24 +336,59 @@ class Plausibility:
         step = _step(reading)
         hold = max(MISREAD_SHARE * step, HOLD_UNITS * reading.resolution)
         rejection, value = self._against(last, candidate, at)
-        # (value, how far above the composed value)
-        options: list[tuple[float, float]] = []
-        if rejection is None:
-            options.append((value, 0.0))
-        elif rejection is Rejection.DECREASED and last.value - value <= hold:
-            options.append((last.value, last.offset))
         judged = [self._against(last, v, at) for v in alternatives]
-        for other_rejection, other in judged:
-            # A higher reading only as a misread of the wheel it differs on:
-            # just above the last value.
-            if other_rejection is None and (
-                other < value
-                or other - last.value <= _misread_rise(other - value, hold)
-            ):
-                options.append((other, other - value))
-        if options:
-            return self._take(reading, *min(options), at)
-        rejections = {rejection, *(r for r, _ in judged)}
+        residuals = list(reading.alternative_residuals)
+        if len(residuals) != len(alternatives):
+            residuals = [reading.residual] * len(alternatives)
+        # (value, how far above the composed value)
+        chosen: tuple[float, float] | None = None
+        if rejection is None:
+            # The composed value comes first when it fits, unless a lower
+            # reading fits the wheels as well: after a gap a coupled counter
+            # read high fits a whole step higher too.
+            lower = [
+                (other, other - value)
+                for (other_rejection, other), residual in zip(
+                    judged, residuals, strict=True
+                )
+                if other_rejection is None
+                and other < value
+                and residual <= reading.residual
+            ]
+            chosen = min([(value, 0.0), *lower])
+        else:
+            options: list[tuple[float, float]] = []
+            if rejection is Rejection.DECREASED and last.value - value <= hold:
+                options.append((last.value, last.offset))
+            for other_rejection, other in judged:
+                # A higher reading only as a misread of the wheel it differs
+                # on: just above the last value.
+                if other_rejection is None and (
+                    other < value
+                    or other - last.value <= _misread_rise(other - value, hold)
+                ):
+                    options.append((other, other - value))
+            if options:
+                chosen = min(options)
+        if chosen is None:
+            rejections = {rejection, *(r for r, _ in judged)}
+            return self._unfitting(reading, rejections, value, at, step, hold)
+        if self._unconfirmed_jump(reading, chosen[0], at, step, hold):
+            return reading.rejected(Rejection.TOO_FAST)
+        return self._take(reading, *chosen, at)
+
+    def _unfitting(
+        self,
+        reading: MeterReading,
+        rejections: set[Rejection | None],
+        value: float,
+        at: datetime,
+        step: float,
+        hold: float,
+    ) -> MeterReading:
+        """Handle a reading none of whose values fit the last one."""
+        assert self.state is not None
+        last = self.state
         if rejections == {Rejection.DECREASED}:
             return self._lower(reading, value, at, step, hold)
         if rejections == {Rejection.TOO_FAST}:
@@ -343,6 +398,32 @@ class Plausibility:
             return reading.rejected(Rejection.TOO_FAST)
         self.state = dataclasses.replace(last, pending=())
         return reading.rejected(Rejection.AMBIGUOUS)
+
+    def _unconfirmed_jump(
+        self,
+        reading: MeterReading,
+        value: float,
+        at: datetime,
+        step: float,
+        hold: float,
+    ) -> bool:
+        """
+        Return True when an unsure rise of a step or more waits for a second.
+
+        A wheel the reader is unsure of can be confused with another digit
+        and rise by whole steps within the allowed rate; the next reading
+        that agrees with it lets it in.
+        """
+        assert self.state is not None
+        last = self.state
+        if value - last.value < step or reading.confidence >= CORROBORATE_BELOW:
+            return False
+        if (jump := last.jump) is not None:
+            hours = max(0.0, (at - jump[1]).total_seconds() / 3600)
+            if -hold <= value - jump[0] <= self._allowed(hours):
+                return False
+        self.state = dataclasses.replace(last, jump=(value, at))
+        return True
 
     def _take(
         self, reading: MeterReading, value: float, offset: float, at: datetime
@@ -362,6 +443,7 @@ class Plausibility:
             offset=offset,
             pending=(),
             dispute=None,
+            jump=None,
         )
         return dataclasses.replace(reading, value=value, rejection=None)
 

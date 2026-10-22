@@ -84,6 +84,8 @@ class MeterReading:
     # Other values the wheels allow near a carry, best fit first, within
     # max_residual; Plausibility picks the one that fits the last value.
     alternatives: tuple[float, ...] = ()
+    # How badly each alternative fits, like residual; empty: as the value.
+    alternative_residuals: tuple[float, ...] = ()
     # Mean grey of the frame, 0 when unknown; see MeterReader.adapt().
     light: float = 0.0
 
@@ -346,6 +348,7 @@ class MeterReader:
             wheels,
             dials,
             alternatives,
+            tuple(residual for _, residual in composition.alternatives),
         )
         if reading.faults:
             return reading.rejected(Rejection.FAULT)

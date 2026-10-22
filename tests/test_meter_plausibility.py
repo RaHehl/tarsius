@@ -251,6 +251,10 @@ def test_invalid_settings(kwargs: dict[str, Any], match: str) -> None:
         Plausibility(**kwargs)
 
 
+def _dials() -> tuple[Reading, ...]:
+    return tuple(Reading(0.0, 0.9) for _ in range(4))
+
+
 def _meter(
     value: float,
     *alternatives: float,
@@ -280,11 +284,22 @@ def test_ambiguous_reading_is_resolved_by_the_last_value() -> None:
     assert guard.review(reading, T0 + 5 * MINUTE).value == 619.97
 
 
-def test_smallest_rise_wins_when_several_fit() -> None:
-    # After a long gap a reading 10 higher fits too; the smaller rise wins.
+def test_smallest_rise_wins_when_several_fit_as_well() -> None:
+    # After a long gap a reading 10 higher fits too; equally good wheels: the
+    # smaller rise wins.
     guard = _guard(600.0)
-    reading = guard.review(_meter(615.5, 605.5), T0 + timedelta(hours=5))
-    assert reading.value == 605.5
+    reading = MeterReading(
+        615.5, 615.5, None, 0.9, 0.1, 0.0001, (), _dials(), (605.5,), (0.1,)
+    )
+    assert guard.review(reading, T0 + timedelta(hours=5)).value == 605.5
+
+
+def test_composed_value_wins_over_a_worse_lower_reading() -> None:
+    guard = _guard(633.759, tolerance=0.001)
+    reading = MeterReading(
+        633.899, 633.899, None, 0.9, 0.05, 0.001, (), (), (633.789,), (0.15,)
+    )
+    assert guard.review(reading, T0 + timedelta(hours=3)).value == 633.899
 
 
 @pytest.mark.parametrize(
@@ -417,10 +432,13 @@ def test_jitter_after_a_gap_holds_instead_of_a_higher_reading() -> None:
 
 
 def test_lower_alternative_wins_over_a_fitting_higher_value() -> None:
-    # A coupled wheel read a tenth high composes 10 too much after a gap.
+    # A coupled wheel read a tenth high composes 10 too much after a gap,
+    # and the lower reading fits the wheels as well.
     guard = _guard(600.0)
-    reading = guard.review(_meter(610.2, 600.2), T0 + timedelta(hours=3))
-    assert reading.value == 600.2
+    reading = MeterReading(
+        610.2, 610.2, None, 0.9, 0.1, 0.0001, (), _dials(), (600.2,), (0.1,)
+    )
+    assert guard.review(reading, T0 + timedelta(hours=3)).value == 600.2
 
 
 def test_a_value_from_an_alternative_can_be_replaced() -> None:
@@ -638,3 +656,52 @@ def test_jitter_within_the_tolerance_keeps_where_the_value_came_from() -> None:
     assert guard.state is not None
     assert guard.state.value == 668.45
     assert guard.state.offset == pytest.approx(10.0)
+
+
+def _unsure(value: float, resolution: float = 0.001) -> MeterReading:
+    return MeterReading(value, value, None, 0.6, 0.05, resolution)
+
+
+def test_unsure_step_rise_waits_for_a_second_reading() -> None:
+    # Red wheels without dials: a 3 read as 6 rises 0.3 within the rate.
+    guard = _guard(638.3, max_rate=2.4)
+    first = guard.review(_unsure(638.601), T0 + timedelta(hours=1))
+    assert first.rejection is Rejection.TOO_FAST
+    assert guard.state is not None
+    assert guard.state.jump == (638.601, T0 + timedelta(hours=1))
+    second = guard.review(_unsure(638.603), T0 + timedelta(hours=1, minutes=5))
+    assert second.value == 638.603
+    assert guard.state.jump is None
+
+
+def test_unsure_step_rise_that_does_not_repeat_stays_out() -> None:
+    guard = _guard(638.3, max_rate=2.4)
+    guard.review(_unsure(638.601), T0 + timedelta(hours=1))
+    # The next reading is right again: the jump never comes back.
+    right = guard.review(_unsure(638.302), T0 + timedelta(hours=1, minutes=5))
+    assert right.value == 638.302
+    assert guard.review(_unsure(638.601), T0 + timedelta(hours=2)).rejection is (
+        Rejection.TOO_FAST
+    )
+
+
+def test_sure_or_small_rises_do_not_wait() -> None:
+    guard = _guard(638.3, max_rate=2.4)
+    assert guard.review(_unsure(638.305), T0 + 5 * MINUTE).accepted
+    sure = MeterReading(638.6, 638.6, None, 0.9, 0.05, 0.001)
+    assert guard.review(sure, T0 + timedelta(hours=1)).accepted
+    # On a meter with dials the step is 10, far above any household rise.
+    dialled = _guard(627.5)
+    reading = MeterReading(627.9, 627.9, None, 0.6, 0.05, 0.0001, (), _dials())
+    assert dialled.review(reading, T0 + timedelta(hours=1)).accepted
+
+
+def test_jump_round_trip_and_checks() -> None:
+    state = PlausibilityState(1.0, T0, jump=(1.3, T0 + MINUTE))
+    assert PlausibilityState.from_dict(json.loads(json.dumps(state.as_dict()))) == state
+    with pytest.raises(MeterDataError, match="jump must be"):
+        PlausibilityState(1.0, T0, jump=(1.3,))  # type: ignore[arg-type]
+    for jump in ([1.3], [1.3, "x"], "x"):
+        data = state.as_dict() | {"jump": jump}
+        with pytest.raises(MeterDataError, match="jump"):
+            PlausibilityState.from_dict(data)
