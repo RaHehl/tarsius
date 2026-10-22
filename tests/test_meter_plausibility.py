@@ -336,8 +336,49 @@ def test_small_clock_step_back_allows_no_rise() -> None:
     assert guard.check(500.1, T0 - 5 * MINUTE) is Rejection.TOO_FAST
 
 
-def test_after_a_long_gap_any_drop_may_be_a_misread() -> None:
+def test_after_a_long_gap_a_new_meter_is_still_taken() -> None:
     guard = _guard(628.5)
-    for i in range(1, 5):
-        later = T0 + timedelta(days=30) + i * 5 * MINUTE
-        assert guard.review(_reading(512.345), later).rejection is Rejection.DECREASED
+    later = T0 + timedelta(days=30)
+    results = [guard.review(_meter(512.345), later + i * 5 * MINUTE) for i in (1, 2, 3)]
+    assert [r.rejection for r in results] == [Rejection.DECREASED] * 2 + [None]
+
+
+def test_small_wheels_do_not_block_a_new_meter() -> None:
+    # Three decimal wheels: a drop of 3.456 is no misread of the 0.01 wheel.
+    guard = _guard(123.456)
+    results = [guard.review(_reading(120.0), T0 + i * 5 * MINUTE) for i in (1, 2, 3)]
+    assert [r.rejection for r in results] == [Rejection.DECREASED] * 2 + [None]
+    # A drop of a whole unit is a misread of the units wheel.
+    guard = _guard(123.456)
+    for i in (1, 2, 3, 4):
+        assert guard.review(_reading(122.456), T0 + i * 5 * MINUTE).rejection is (
+            Rejection.DECREASED
+        )
+
+
+def test_a_misread_at_rest_stays_out_for_hours() -> None:
+    guard = _guard(668.4)
+    for i in range(1, 30):
+        later = T0 + i * timedelta(hours=1)
+        assert guard.review(_meter(658.4), later).rejection is Rejection.DECREASED
+
+
+def test_a_misread_with_jitter_below_the_last_value() -> None:
+    guard = _guard(668.4, tolerance=0.001)
+    for i in range(1, 6):
+        reading = guard.review(_meter(658.3999), T0 + i * 5 * MINUTE)
+        assert reading.rejection is Rejection.DECREASED
+
+
+def test_a_misread_stays_out_while_the_true_value_moves_on() -> None:
+    # Seen once right after the last value, the offset is remembered.
+    guard = _guard(668.4)
+    assert guard.review(_meter(658.4), T0 + 5 * MINUTE).rejection is (
+        Rejection.DECREASED
+    )
+    for i in range(1, 20):
+        later = T0 + i * timedelta(hours=6)
+        reading = guard.review(_meter(658.4 + 0.1 * i), later)
+        assert reading.rejection is Rejection.DECREASED
+    guard.accept(500.0, T0 + timedelta(days=6))
+    assert not guard._misreads

@@ -125,6 +125,8 @@ class Plausibility:
         self.confirmations = confirmations
         self.state = state
         self._pending: list[PlausibilityState] = []
+        # Offsets of misreads seen, so the same bias stays out later too.
+        self._misreads: set[float] = set()
 
     def check(self, value: float, at: datetime) -> Rejection | None:
         """Return why ``value`` at ``at`` is implausible, or None; changes nothing."""
@@ -138,6 +140,7 @@ class Plausibility:
         """Take ``value`` as the last accepted one, e.g. a confirmed reading."""
         self.state = PlausibilityState(value, at)
         self._pending.clear()
+        self._misreads.clear()
 
     def review(self, reading: MeterReading, at: datetime) -> MeterReading:
         """
@@ -246,15 +249,23 @@ class Plausibility:
 
         A drop that misread upper wheels explain never counts: three
         readings that agree on it are more likely one bias seen three times
-        than a new meter.
+        than a new meter. The offset is remembered, so the same misread stays
+        out also once the true value has moved on.
         """
         assert self.state is not None
         hours = max(0.0, (at - self.state.at).total_seconds() / 3600)
-        if _misread(
-            self.state.value - value,
+        offset = _misread(
+            value,
+            self.state.value,
             self._allowed(hours),
             self.tolerance,
             reading.resolution * 10 ** (len(reading.dials) + 1),
+        )
+        if offset is not None:
+            self._misreads.add(offset)
+        if offset is not None or any(
+            self._against(self.state, value + seen, at)[0] is None
+            for seen in self._misreads
         ):
             self._pending.clear()
             return False
@@ -268,22 +279,34 @@ class Plausibility:
 
 # Upper wheels a misread may touch at once.
 MISREAD_WHEELS = 2
+# A misread keeps the lower wheels right, so the true value lies just above
+# the last one in their digits: within this share of the wheel's unit.
+MISREAD_SHARE = 0.02
 
 
-def _misread(drop: float, allowed: float, tolerance: float, step: float) -> bool:
+def _misread(
+    value: float, last: float, allowed: float, tolerance: float, step: float
+) -> float | None:
     """
-    Return True when misread upper wheels explain a drop.
+    Return the offset of a misread of upper wheels that explains a drop.
 
-    ``step`` is the unit of the lowest wheel that can jump. A reading that
-    is one or two such wheels a digit or more off, while the true value rose
-    by up to ``allowed``, is lower by a number of steps with at most two
-    digits other than 0.
+    ``step`` is the unit of the lowest wheel that can jump. A reading with
+    one or two wheels a digit or more off shows the lower wheels right: the
+    true value is ``value`` plus a multiple of a wheel's unit with at most
+    two digits other than 0, and lies a small rise above ``last``. A new
+    meter matches that only by chance. None when no misread explains it.
     """
-    low = max(1, math.ceil((drop - tolerance) / step))
-    high = math.floor((drop + allowed) / step)
-    if high - low > 1000:
-        # A long gap: any drop could be a misread.
-        return True
-    return any(
-        sum(c != "0" for c in str(n)) <= MISREAD_WHEELS for n in range(low, high + 1)
-    )
+    unit = step
+    while unit <= last - value + allowed + tolerance:
+        rise = (value - last) % unit
+        if rise > unit - tolerance:
+            rise -= unit
+        steps = round((last + rise - value) / unit)
+        if (
+            steps >= 1
+            and rise <= min(allowed + tolerance, MISREAD_SHARE * unit)
+            and sum(c != "0" for c in str(steps)) <= MISREAD_WHEELS
+        ):
+            return steps * unit
+        unit *= 10
+    return None
