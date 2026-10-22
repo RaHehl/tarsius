@@ -3,10 +3,17 @@ name = "tarsius"
 version = "0.0.0"
 license = "Apache-2.0 AND BSD-2-Clause"
 license-files = ["LICENSE", "NOTICE", "src/tarsius/models/LICENSE.squeezenet"]
-description = "Local, training-free state detection for a region of a camera image"
+description = "Local state detection and utility meter reading for regions of a camera image"
 authors = [{ name = "Raphael Hehl" }]
 readme = "README.md"
-keywords = ["camera", "computer-vision", "home-assistant", "ncnn", "presence"]
+keywords = [
+    "camera",
+    "computer-vision",
+    "home-assistant",
+    "meter-reading",
+    "ncnn",
+    "presence",
+]
 requires-python = ">=3.14"
 dependencies = [
     "ncnn>=1.0.20261020",

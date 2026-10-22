@@ -6,3 +6,10 @@ This product bundles the SqueezeNet v1.1 model
 weights. BSD-2-Clause, see tarsius/models/LICENSE.squeezenet.
 Copyright (c) 2016 Forrest N. Iandola and Matthew W. Moskewicz and
 Khalid Ashraf and Song Han and William J. Dally and Kurt Keutzer.
+
+The meter models in tarsius/meter/models were trained by Raphael Hehl on
+generated data and the training split of the Word-Wheel Water Meter Dataset
+(Zhao, S., Gao, Y., Zhang, Y., Li, J., Liu, F. (2026). A comprehensive
+dataset for word-wheel water meter reading under challenging conditions.
+Dryad. https://doi.org/10.5061/dryad.7d7wm3860), released under CC0-1.0 and
+credited here as a courtesy. See tarsius/meter/models/MODELS.md.
