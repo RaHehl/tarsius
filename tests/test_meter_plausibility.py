@@ -378,18 +378,27 @@ def test_a_misread_with_jitter_below_the_last_value() -> None:
 
 
 def test_a_misread_stays_out_while_the_true_value_moves_on() -> None:
-    # Seen once right after the last value, the offset is remembered.
+    # Seen once right after the last value, the misread is followed.
     guard = _guard(668.4)
-    assert guard.review(_meter(658.4), T0 + 5 * MINUTE).rejection is (
-        Rejection.DECREASED
-    )
-    for i in range(1, 20):
-        later = T0 + i * timedelta(hours=6)
-        reading = guard.review(_meter(658.4 + 0.1 * i), later)
+    for i in range(1, 400):
+        reading = guard.review(_meter(658.4 + 0.001 * i), T0 + i * 5 * MINUTE)
         assert reading.rejection is Rejection.DECREASED
     guard.accept(500.0, T0 + timedelta(days=6))
     assert guard.state is not None
     assert not guard.state.misreads
+
+
+def test_a_misread_not_seen_for_long_is_forgotten() -> None:
+    guard = _guard(668.4)
+    guard.review(_meter(658.4), T0 + 5 * MINUTE)
+    assert guard.state is not None
+    assert [m[0] for m in guard.state.misreads] == [10.0]
+    # Hours later the allowed rise reaches the offset: 658.9 is a drop.
+    later = T0 + timedelta(hours=3)
+    results = [
+        guard.review(_meter(658.912 + 0.001 * i), later + i * MINUTE) for i in (1, 2, 3)
+    ]
+    assert [r.rejection for r in results] == [Rejection.DECREASED] * 2 + [None]
 
 
 def test_jitter_after_a_gap_holds_instead_of_a_higher_reading() -> None:
@@ -400,10 +409,10 @@ def test_jitter_after_a_gap_holds_instead_of_a_higher_reading() -> None:
     reading = guard.review(_meter(627.6997, 637.6997, 617.6997), later)
     assert reading.value == 627.7
     assert guard.state is not None
-    assert (guard.state.value, guard.state.at, guard.state.alternative) == (
+    assert (guard.state.value, guard.state.at, guard.state.offset) == (
         627.7,
         later,
-        False,
+        0.0,
     )
 
 
@@ -418,7 +427,7 @@ def test_a_value_from_an_alternative_can_be_replaced() -> None:
     guard = _guard(668.4)
     guard.review(_meter(658.45, 668.45), T0 + 5 * MINUTE)
     assert guard.state is not None
-    assert guard.state.alternative
+    assert guard.state.offset == pytest.approx(10.0)
     results = [
         guard.review(_meter(658.46 + 0.001 * i), T0 + (i + 2) * 5 * MINUTE)
         for i in range(3)
@@ -469,9 +478,9 @@ def test_full_state_round_trip() -> None:
     state = PlausibilityState(
         627.8846,
         T0,
-        alternative=True,
+        offset=10.0,
         pending=((620.0, T0 + MINUTE),),
-        misreads=(10.0,),
+        misreads=((10.0, 617.8, T0),),
         dispute=Dispute(T0, T0 + MINUTE, 2, 617.8),
     )
     restored = PlausibilityState.from_dict(json.loads(json.dumps(state.as_dict())))
@@ -481,12 +490,14 @@ def test_full_state_round_trip() -> None:
 @pytest.mark.parametrize(
     ("change", "match"),
     [
-        ({"alternative": "yes"}, "alternative"),
+        ({"offset": "yes"}, "offset"),
         ({"pending": "x"}, "pending must be a list"),
         ({"pending": [[1.0]]}, "pending must be"),
         ({"pending": [[1.0, "soon"]]}, "pending time"),
-        ({"misreads": [-10.0]}, "positive"),
-        ({"misreads": ["10"]}, "misread"),
+        ({"misreads": [[-10.0, 1.0, T0.isoformat()]]}, "positive"),
+        ({"misreads": [[10.0, "1", T0.isoformat()]]}, "misread value"),
+        ({"misreads": [[10.0, 1.0]]}, "offset, value, time"),
+        ({"misreads": [[10.0, 1.0, "x"]]}, "misread time"),
         ({"dispute": {"since": T0.isoformat()}}, "dispute is missing"),
         ({"dispute": [1]}, "dispute must be a mapping"),
         (
@@ -526,3 +537,88 @@ def test_new_meter_taken_with_a_clock_stepped_back_keeps_the_time() -> None:
         reading = guard.review(_reading(512.345), T0 - i * MINUTE)
     assert reading.accepted
     assert _vt(guard) == (512.345, T0)
+
+
+def test_misread_with_its_lower_wheels_a_little_low() -> None:
+    # A hundreds wheel read 1 low while the dials read 0.0002 low.
+    guard = _guard(627.78)
+    for i in range(1, 6):
+        reading = guard.review(_meter(527.7798), T0 + i * 5 * MINUTE)
+        assert reading.rejection is Rejection.DECREASED
+
+
+def test_a_rejected_reading_breaks_agreeing_lower_ones() -> None:
+    guard = _guard(628.5)
+    for i, reading in enumerate(
+        (
+            _reading(512.345),
+            _reading(512.345),
+            _reading(512.345).rejected(Rejection.FAULT),
+            _reading(512.345),
+        ),
+        start=1,
+    ):
+        result = guard.review(reading, T0 + i * MINUTE)
+    assert result.rejection is Rejection.DECREASED
+    assert guard.review(_reading(512.345), T0 + 5 * MINUTE).rejection is (
+        Rejection.DECREASED
+    )
+    assert guard.review(_reading(512.345), T0 + 6 * MINUTE).accepted
+
+
+def test_lasting_too_fast_readings_become_a_dispute() -> None:
+    # A typo 100 too low: readings rise too fast for hours.
+    guard = _guard(527.5)
+    for i in range(1, 80):
+        guard.review(_meter(627.5 + 0.001 * i), T0 + i * 5 * MINUTE)
+    dispute = guard.dispute
+    assert dispute is not None
+    assert dispute.value > 627.5
+
+
+def test_dispute_restarts_when_the_direction_changes() -> None:
+    guard = _guard(668.4)
+    guard.review(_meter(658.4), T0 + 5 * MINUTE)
+    guard.review(_meter(868.4), T0 + 10 * MINUTE)
+    assert guard.state is not None
+    assert guard.state.dispute == Dispute(T0 + 10 * MINUTE, T0 + 10 * MINUTE, 1, 868.4)
+
+
+def test_higher_alternative_only_just_above_the_last_value() -> None:
+    # A coupled counter read 0.25 low after 3 h: its jumped reading 9.75
+    # above the last value fits the allowed rise but is no misread.
+    guard = _guard(627.7)
+    later = T0 + timedelta(hours=3)
+    reading = guard.review(_meter(627.45, 637.45), later)
+    assert reading.rejection is Rejection.AMBIGUOUS
+    assert _vt(guard) == (627.7, T0)
+
+
+def test_hold_keeps_where_the_value_came_from() -> None:
+    guard = _guard(668.4)
+    guard.review(_meter(658.45, 668.45), T0 + 5 * MINUTE)
+    guard.review(_meter(668.449), T0 + 10 * MINUTE)
+    assert guard.state is not None
+    assert guard.state.value == 668.45
+    assert guard.state.offset == pytest.approx(10.0)
+
+
+def test_waiver_only_for_the_offset_of_the_alternative() -> None:
+    guard = _guard(668.4)
+    guard.review(_meter(658.45, 668.45), T0 + 5 * MINUTE)
+    for i in range(2, 8):
+        reading = guard.review(_meter(568.46), T0 + i * 5 * MINUTE)
+        assert reading.rejection is Rejection.DECREASED
+
+
+def test_misreads_followed_are_bounded() -> None:
+    guard = _guard(9668.4)
+    for i, drop in enumerate((10, 20, 30, 40, 50, 100), start=1):
+        guard.review(_meter(9668.4 - drop), T0 + i * MINUTE)
+    assert guard.state is not None
+    assert [m[0] for m in guard.state.misreads] == [30.0, 40.0, 50.0, 100.0]
+
+
+def test_misreads_must_be_triples() -> None:
+    with pytest.raises(MeterDataError, match="offset, value, time"):
+        PlausibilityState(1.0, T0, misreads=(10.0,))  # type: ignore[arg-type]

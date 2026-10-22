@@ -317,6 +317,7 @@ def test_unloadable_model(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> No
         ({"views": 2.0}, "views"),
         ({"min_confidence": float("nan")}, "min_confidence"),
         ({"max_residual": "0.4"}, "max_residual"),
+        ({"min_mean_confidence": 1.5}, "min_mean_confidence"),
     ],
 )
 def test_invalid_settings(kwargs: dict[str, object], match: str) -> None:
@@ -444,3 +445,13 @@ def test_adapt_ignores_doubtful_readings(reader: MeterReader) -> None:
         dataclasses.replace(reading, wheels=(Reading(1.0, 0.9), *reading.wheels[1:])),
     ):
         assert reader.adapt(calibration, doubtful) is calibration
+
+
+def test_window_without_digits_is_unsure() -> None:
+    # Every wheel barely sure: the mean gives a window of housing away.
+    judge = MeterReader()._judge
+    shape = layout(wheels=4, dials=0)
+    housing = judge(shape, _readings(1.0, 2.0, 3.0, 4.0, confidence=0.6), ())
+    assert housing.rejection is Rejection.LOW_CONFIDENCE
+    digits = (*_readings(1.0, 2.0, 3.0, confidence=0.95), Reading(4.0, 0.55))
+    assert judge(shape, digits, ()).accepted

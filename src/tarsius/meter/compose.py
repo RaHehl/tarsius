@@ -44,12 +44,15 @@ class Composition:
     ambiguous: bool = False
     # Other values the positions allow when upper wheels are read the other
     # way, coupled instead of jumped or back, as (value, residual), best
-    # first. Near a carry, or with a reader biased by a tenth of a digit,
+    # first, at most ALTERNATIVE_MARGIN worse. Near a carry, or with a reader
+    # biased by a tenth of a digit,
     # one of them can be the right one; Plausibility picks it by the last
     # value.
     alternatives: tuple[tuple[float, float], ...] = ()
 
 
+# Alternatives fit at most this much worse than the composed value.
+ALTERNATIVE_MARGIN = 0.15
 # At most this many alternatives are searched; each upper wheel near a carry
 # doubles them.
 MAX_ALTERNATIVES = 64
@@ -111,10 +114,15 @@ def compose(
             if primary or max(worst, error) <= max_residual:
                 stack.append((index + 1, next_below, (*path, digit), max(worst, error)))
     value, residual = found[0]
-    alternatives = sorted(
-        {(v, r) for v, r in found[1:] if v != value},
-        key=lambda item: (item[1], item[0]),
-    )
+    # Only readings that fit about as well: on jumping wheels the coupled
+    # reading of a wheel above a 6 or more fits poorly and would stand as a
+    # value one step lower all the time.
+    others = {
+        (v, r)
+        for v, r in found[1:]
+        if v != value and r <= residual + ALTERNATIVE_MARGIN
+    }
+    alternatives = sorted(others, key=lambda item: (item[1], item[0]))
     return Composition(value, residual, ambiguous, tuple(alternatives))
 
 

@@ -31,6 +31,8 @@ MISREAD_WHEELS = 2
 MISREAD_SHARE = 0.02
 # A drop of this many units of the last wheel or dial also holds the value.
 HOLD_UNITS = 5
+# Misreads followed at once.
+MAX_MISREADS = 4
 # Lower readings that only a misread explains, for this long and this often,
 # are a dispute the user should settle: the meter or the last value is wrong.
 DISPUTE_AFTER = timedelta(hours=6)
@@ -108,19 +110,20 @@ class PlausibilityState:
     value: float
     # Timezone-aware; naive datetimes are rejected.
     at: datetime
-    # The value came from an alternative reading, not the composed one.
-    alternative: bool = False
+    # How far the value lies above the composed value of its reading; not
+    # 0 when an alternative was taken.
+    offset: float = 0.0
     # Lower readings that agree so far, (value, time), oldest first.
     pending: tuple[tuple[float, datetime], ...] = ()
-    # Offsets of misreads seen since the last confirmed value.
-    misreads: tuple[float, ...] = ()
+    # Misreads followed, (offset, latest such reading, its time).
+    misreads: tuple[tuple[float, float, datetime], ...] = ()
     dispute: Dispute | None = None
 
     def __post_init__(self) -> None:
         """Reject values no review produces; raises MeterDataError."""
         checks.number(self.value, "value")
         checks.aware(self.at, "at")
-        checks.flag(self.alternative, "alternative")
+        checks.number(self.offset, "offset")
         object.__setattr__(self, "pending", tuple(self.pending))
         object.__setattr__(self, "misreads", tuple(self.misreads))
         for item in self.pending:
@@ -128,9 +131,15 @@ class PlausibilityState:
                 raise MeterDataError(f"pending must be (value, time), got {item!r}")
             checks.number(item[0], "pending value")
             checks.aware(item[1], "pending time")
-        for offset in self.misreads:
-            if checks.number(offset, "misread") <= 0:
+        for misread in self.misreads:
+            if not isinstance(misread, tuple) or len(misread) != 3:
+                raise MeterDataError(
+                    f"misreads must be (offset, value, time), got {misread!r}"
+                )
+            if checks.number(misread[0], "misread offset") <= 0:
                 raise MeterDataError("misread offsets must be positive")
+            checks.number(misread[1], "misread value")
+            checks.aware(misread[2], "misread time")
         if self.dispute is not None and not isinstance(self.dispute, Dispute):
             raise MeterDataError(f"dispute must be a Dispute, got {self.dispute!r}")
 
@@ -139,9 +148,11 @@ class PlausibilityState:
         return {
             "value": self.value,
             "at": self.at.isoformat(),
-            "alternative": self.alternative,
+            "offset": self.offset,
             "pending": [[value, at.isoformat()] for value, at in self.pending],
-            "misreads": list(self.misreads),
+            "misreads": [
+                [offset, value, at.isoformat()] for offset, value, at in self.misreads
+            ],
             "dispute": None if self.dispute is None else self.dispute.as_dict(),
         }
 
@@ -156,13 +167,23 @@ class PlausibilityState:
                 if len(pair) != 2:
                     raise MeterDataError(f"pending must be (value, time), got {item!r}")
                 pending.append((pair[0], _time(pair[1], "pending time")))
+            misreads = []
+            for item in _list(data.get("misreads", []), "misreads"):
+                triple = _list(item, "misread")
+                if len(triple) != 3:
+                    raise MeterDataError(
+                        f"misreads must be (offset, value, time), got {item!r}"
+                    )
+                misreads.append(
+                    (triple[0], triple[1], _time(triple[2], "misread time"))
+                )
             dispute = data.get("dispute")
             return cls(
                 data["value"],
                 _time(data["at"], "at"),
-                data.get("alternative", False),
+                data.get("offset", 0.0),
                 tuple(pending),
-                tuple(_list(data.get("misreads", []), "misreads")),
+                tuple(misreads),
                 None if dispute is None else Dispute.from_dict(dispute),
             )
         except KeyError as err:
@@ -274,13 +295,16 @@ class Plausibility:
         Check a reading against the last accepted value and return it.
 
         Readings the reader rejected for anything but AMBIGUOUS are returned
-        unchanged. Otherwise the composed value or an alternative is taken
-        as the class describes, or the reading comes back rejected with
-        UNCONFIRMED, DECREASED (all lower), TOO_FAST (all higher) or
-        AMBIGUOUS (some lower, some higher). A held value comes back as the
-        last value. With ``period`` the value counts on past a wrap.
+        unchanged; they break a run of agreeing lower readings. Otherwise
+        the composed value or an alternative is taken as the class
+        describes, or the reading comes back rejected with UNCONFIRMED,
+        DECREASED (all lower), TOO_FAST (all higher) or AMBIGUOUS (some
+        lower, some higher). A held value comes back as the last value.
+        With ``period`` the value counts on past a wrap.
         """
         if reading.rejection not in (None, Rejection.AMBIGUOUS):
+            if self.state is not None and self.state.pending:
+                self.state = dataclasses.replace(self.state, pending=())
             return reading
         at = checks.aware(at, "at")
         candidate = checks.number(reading.candidate, "value")
@@ -292,31 +316,34 @@ class Plausibility:
         step = _step(reading)
         hold = max(MISREAD_SHARE * step, HOLD_UNITS * reading.resolution)
         rejection, value = self._against(last, candidate, at)
-        drop = last.value - value
-        # (value, from an alternative)
-        options: list[tuple[float, bool]] = []
+        # (value, how far above the composed value)
+        options: list[tuple[float, float]] = []
         if rejection is None:
-            options.append((value, False))
-        elif rejection is Rejection.DECREASED and drop <= hold:
-            options.append((last.value, False))
+            options.append((value, 0.0))
+        elif rejection is Rejection.DECREASED and last.value - value <= hold:
+            options.append((last.value, last.offset))
         judged = [self._against(last, v, at) for v in alternatives]
         for other_rejection, other in judged:
-            higher = other > value
-            if other_rejection is None and (not higher or drop > hold):
-                options.append((other, True))
+            # A higher reading only as a misread: just above the last value.
+            if other_rejection is None and (
+                other < value or other - last.value <= MISREAD_SHARE * step
+            ):
+                options.append((other, other - value))
         if options:
-            value, alternative = min(options)
-            return self._take(reading, value, at, alternative=alternative)
+            return self._take(reading, *min(options), at)
         rejections = {rejection, *(r for r, _ in judged)}
         if rejections == {Rejection.DECREASED}:
-            return self._lower(reading, value, at, step)
-        self.state = dataclasses.replace(last, pending=())
+            return self._lower(reading, value, at, step, hold)
         if rejections == {Rejection.TOO_FAST}:
+            self.state = dataclasses.replace(
+                last, pending=(), dispute=_disputed(last, value, at)
+            )
             return reading.rejected(Rejection.TOO_FAST)
+        self.state = dataclasses.replace(last, pending=())
         return reading.rejected(Rejection.AMBIGUOUS)
 
     def _take(
-        self, reading: MeterReading, value: float, at: datetime, *, alternative: bool
+        self, reading: MeterReading, value: float, offset: float, at: datetime
     ) -> MeterReading:
         """Remember an accepted value; a lower one holds the last."""
         assert self.state is not None
@@ -324,47 +351,48 @@ class Plausibility:
         if value <= last.value:
             # Jitter holds the value instead of lowering it, so a total
             # does not wobble; the meter stands there now.
-            value = last.value
-            alternative = alternative and last.alternative
+            value, offset = last.value, last.offset
         # The clock may step back; the state's time never does.
         self.state = dataclasses.replace(
             last,
             value=value,
             at=max(at, last.at),
-            alternative=alternative,
+            offset=offset,
             pending=(),
             dispute=None,
         )
         return dataclasses.replace(reading, value=value, rejection=None)
 
     def _lower(
-        self, reading: MeterReading, value: float, at: datetime, step: float
+        self,
+        reading: MeterReading,
+        value: float,
+        at: datetime,
+        step: float,
+        hold: float,
     ) -> MeterReading:
         """Handle a reading whose values are all lower than the last one."""
         assert self.state is not None
         last = self.state
         hours = max(0.0, (at - last.at).total_seconds() / 3600)
-        if not last.alternative:
-            offset = _misread(
-                value, last.value, self._allowed(hours), self.tolerance, step
+        offset = _misread(value, last.value, self._allowed(hours), hold, step)
+        if offset is None:
+            offset = self._followed(value, at, hold)
+        # The last value came from an alternative this much higher: readings
+        # that fall back by it may be right after all.
+        waived = offset is not None and math.isclose(
+            offset, last.offset, rel_tol=1e-6, abs_tol=self.tolerance
+        )
+        if offset is not None and not waived:
+            followed = [m for m in last.misreads if m[0] != offset]
+            misreads = (*followed, (offset, value, at))[-MAX_MISREADS:]
+            self.state = dataclasses.replace(
+                last,
+                pending=(),
+                misreads=misreads,
+                dispute=_disputed(last, value, at),
             )
-            known = any(
-                self._against(last, value + seen, at)[0] is None
-                for seen in last.misreads
-            )
-            if offset is not None or known:
-                misreads = last.misreads
-                if offset is not None and offset not in misreads:
-                    misreads = (*misreads, offset)
-                dispute = last.dispute
-                if dispute is None:
-                    dispute = Dispute(at, at, 1, value)
-                else:
-                    dispute = Dispute(dispute.since, at, dispute.count + 1, value)
-                self.state = dataclasses.replace(
-                    last, pending=(), misreads=misreads, dispute=dispute
-                )
-                return reading.rejected(Rejection.DECREASED)
+            return reading.rejected(Rejection.DECREASED)
         pending = last.pending
         if pending:
             previous = PlausibilityState(*pending[-1])
@@ -377,6 +405,23 @@ class Plausibility:
         # Enough agree: a new meter, or a last value that was wrong.
         self.state = PlausibilityState(value, max(at, last.at))
         return dataclasses.replace(reading, value=value, rejection=None)
+
+    def _followed(self, value: float, at: datetime, hold: float) -> float | None:
+        """
+        Return the offset of a misread followed so far that ``value`` continues.
+
+        A misread at rest keeps its lower wheels right while the true value
+        moves on, so it is followed from reading to reading: the next one
+        lies a hold below to a rise above the latest. A misread not seen for
+        so long that the allowed rise reaches its offset is forgotten.
+        """
+        assert self.state is not None
+        for offset, seen, seen_at in self.state.misreads:
+            hours = max(0.0, (at - seen_at).total_seconds() / 3600)
+            allowed = self._allowed(hours)
+            if allowed < offset and -hold <= value - seen <= allowed:
+                return offset
+        return None
 
     def _last(self, at: datetime) -> PlausibilityState | None:
         """Return the state, its time pulled back if it lies well ahead of ``at``."""
@@ -422,13 +467,21 @@ class Plausibility:
         return value
 
 
+def _disputed(last: PlausibilityState, value: float, at: datetime) -> Dispute:
+    """Return the dispute of ``last`` continued by a reading, or a new one."""
+    dispute = last.dispute
+    if dispute is None or (dispute.value < last.value) != (value < last.value):
+        return Dispute(at, at, 1, value)
+    return Dispute(dispute.since, at, dispute.count + 1, value)
+
+
 def _step(reading: MeterReading) -> float:
     """Return the unit of the lowest wheel of a reading that can jump."""
     return float(reading.resolution * 10 ** (len(reading.dials) + 1))
 
 
 def _misread(
-    value: float, last: float, allowed: float, tolerance: float, step: float
+    value: float, last: float, allowed: float, hold: float, step: float
 ) -> float | None:
     """
     Return the offset of a misread of upper wheels that explains a drop.
@@ -437,17 +490,18 @@ def _misread(
     one or two wheels a digit or more off shows the lower wheels right: the
     true value is ``value`` plus a multiple of a wheel's unit with at most
     two digits other than 0, and lies a small rise above ``last``. A new
-    meter matches that only by chance. None when no misread explains it.
+    meter matches that only by chance. The lower wheels may read up to
+    ``hold`` low. None when no misread explains it.
     """
     unit = step
-    while unit <= last - value + allowed + tolerance:
+    while unit <= last - value + allowed + hold:
         rise = (value - last) % unit
-        if rise > unit - tolerance:
+        if rise > unit - hold:
             rise -= unit
         steps = round((last + rise - value) / unit)
         if (
             steps >= 1
-            and rise <= min(allowed + tolerance, MISREAD_SHARE * unit)
+            and rise <= min(allowed, MISREAD_SHARE * unit)
             and sum(c != "0" for c in str(steps)) <= MISREAD_WHEELS
         ):
             return steps * unit

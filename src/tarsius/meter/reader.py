@@ -38,6 +38,10 @@ ADAPT_CONFIDENCE = 0.7
 ADAPT_RATE = 0.05
 # Defaults chosen on the maintainer's meter, see the README.
 MIN_CONFIDENCE = 0.5
+# A window without digits leaves every wheel unsure: its mean confidence
+# stayed below 0.67 on a foreign meter's housing, readable windows above
+# 0.82 on both meters.
+MIN_MEAN_CONFIDENCE = 0.75
 MAX_RESIDUAL = 0.4
 
 
@@ -137,14 +141,17 @@ class MeterReader:
         min_confidence: float = MIN_CONFIDENCE,
         max_residual: float = MAX_RESIDUAL,
         views: int = 1,
+        min_mean_confidence: float = MIN_MEAN_CONFIDENCE,
     ) -> None:
         """
         Create a reader; loads nothing yet.
 
         A reading is rejected when a wheel or dial is less sure than
-        ``min_confidence`` or the carry rule leaves a misfit above
-        ``max_residual`` digits. ``views`` of 2 to 5 also reads every crop
-        shifted by a pixel and averages, which costs as many times the time.
+        ``min_confidence``, the wheels and dials on average less sure than
+        ``min_mean_confidence`` (a window without digits), or the carry
+        rule leaves a misfit above ``max_residual`` digits. ``views`` of 2
+        to 5 also reads every crop shifted by a pixel and averages, which
+        costs as many times the time.
         """
         if not 0.0 <= checks.number(min_confidence, "min_confidence") <= 1.0:
             raise MeterDataError("min_confidence must be 0 to 1")
@@ -152,6 +159,9 @@ class MeterReader:
             raise MeterDataError("max_residual must be above 0 and at most 0.5")
         if not 1 <= checks.integer(views, "views") <= 5:
             raise MeterDataError("views must be 1 to 5")
+        if not 0.0 <= checks.number(min_mean_confidence, "min_mean_confidence") <= 1.0:
+            raise MeterDataError("min_mean_confidence must be 0 to 1")
+        self._min_mean_confidence = min_mean_confidence
         self._min_confidence = min_confidence
         self._max_residual = max_residual
         self._views = views
@@ -339,7 +349,8 @@ class MeterReader:
         )
         if reading.faults:
             return reading.rejected(Rejection.FAULT)
-        if confidence < self._min_confidence:
+        mean = sum(r.confidence for r in (*wheels, *dials)) / len((*wheels, *dials))
+        if confidence < self._min_confidence or mean < self._min_mean_confidence:
             return reading.rejected(Rejection.LOW_CONFIDENCE)
         if composition.residual > self._max_residual:
             return reading.rejected(Rejection.INCONSISTENT)

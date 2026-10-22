@@ -84,3 +84,12 @@ def test_jumped_wheel_wins_by_more_than_the_margin() -> None:
     result = compose([2.0, 9.0])
     assert result.value == pytest.approx(29.0)
     assert not result.ambiguous
+
+
+def test_alternatives_fit_about_as_well() -> None:
+    # A 6 read 5.897 above a units wheel at 8.45: jumped it is 0.1 off,
+    # close enough; a 6 at 6.0 above 7.0 read coupled is 0.3 off, dropped.
+    close = compose([0.0, 0.0, 6.0, 5.897, 8.45], [4.5, 5.0])
+    assert [round(v, 2) for v, _ in close.alternatives] == [668.45]
+    far = compose([0.0, 0.0, 6.0, 6.0, 7.0], [0.0, 0.0])
+    assert far.alternatives == ()
