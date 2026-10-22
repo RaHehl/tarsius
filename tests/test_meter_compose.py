@@ -51,3 +51,36 @@ def test_residual_flags_a_wheel_between_marks() -> None:
 
 def test_empty() -> None:
     assert compose([]).value == 0.0
+
+
+def test_dial_digit_counts_back_over_zero() -> None:
+    # x0.1 just past 0 while x0.01 still shows 9.7: the tenth is 9, not 0.
+    assert compose([], [0.02, 9.7]).value == pytest.approx(0.997)
+
+
+@pytest.mark.parametrize("last", [8.95, 8.99, 9.0, 9.03])
+def test_wheel_above_the_dials_is_coupled(last: float) -> None:
+    # Dials at 0.99: the last wheel is just before its carry to 9.
+    result = compose([6.0, 2.0, 7.0, last], [9.9])
+    assert result.value == pytest.approx(6278.99)
+    assert not result.ambiguous
+
+
+def test_upper_wheel_near_a_carry_is_ambiguous() -> None:
+    # Jumped 2 at 2.0 or coupled 1 at 1.997, the wheel at 1.99 fits both.
+    assert compose([1.99, 9.97]).ambiguous
+    assert compose([2.0, 9.97], [9.7]).ambiguous
+
+
+def test_upper_wheel_away_from_a_carry_is_not_ambiguous() -> None:
+    assert not compose([1.99, 5.0]).ambiguous
+    # Both readings fit equally well but give the same digit.
+    assert not compose([3.05, 1.0]).ambiguous
+    assert not compose([0.0, 6.0, 2.0, 7.88], [8.85, 8.46, 4.63, 6.3]).ambiguous
+
+
+def test_jumped_wheel_wins_by_more_than_the_margin() -> None:
+    # Coupled 1 at 1.9 is 0.1 off, jumped 2 fits: no ambiguity, 2 wins.
+    result = compose([2.0, 9.0])
+    assert result.value == pytest.approx(29.0)
+    assert not result.ambiguous

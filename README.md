@@ -17,13 +17,13 @@
   <a href="https://github.com/j178/prek"><img src="https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/j178/prek/master/docs/assets/badge-v0.json" alt="prek"></a>
 </p>
 
-Local, training-free state detection for a region of a camera image: is the car in the garage, is the mailbox flag up, is the gate open.
+Local state detection for a region of a camera image: is the car in the garage, is the mailbox flag up, is the gate open. It also reads utility meters with counter wheels and pointer dials.
 
 You confirm a few frames per state, tarsius compares new frames against them and answers with a state or "unsure". Nothing leaves the machine and nothing gets trained.
 
 ## Why tarsius
 
-Tarsiers are small nocturnal primates whose eyes are each about as large as their brain. Lots of eye, little brain, and very good at seeing in the dark. That is the idea here too: no training and no model to learn, just careful looking, including at IR night frames.
+Tarsiers are small nocturnal primates whose eyes are each about as large as their brain. Lots of eye, little brain, and very good at seeing in the dark. That is the idea here too: no training on your frames and no model to learn, just careful looking, including at IR night frames.
 
 ```python
 from tarsius import Roi, StateDetector
@@ -95,16 +95,21 @@ calibration = reader.calibrate([jpeg_1, jpeg_2], layout)  # once, store as_dict(
 reading = reader.read(jpeg, layout, calibration)
 reading.value  # 627.8846, or None when rejected
 reading.candidate  # the composed value, also when rejected
-reading.rejection  # None, FAULT, LOW_CONFIDENCE or INCONSISTENT
+reading.rejection  # None, FAULT, LOW_CONFIDENCE, INCONSISTENT or AMBIGUOUS
 
-guard = Plausibility(max_rate=5.0, tolerance=0.0002)  # units per hour
-reading = guard.review(reading, at=now)  # adds DECREASED or TOO_FAST
+guard = Plausibility(max_rate=4.0, tolerance=0.0002, period=layout.period)
+guard.accept(627.88, at=confirmed_at)  # a value the user confirmed, aware time
+reading = guard.review(reading, at=now)  # adds DECREASED, TOO_FAST or UNCONFIRMED
 store(guard.state.as_dict())  # and pass state=PlausibilityState.from_dict(...)
 ```
 
-Regions are fractions of the frame after turning it by `rotation` about its centre, like `PIL.Image.rotate`. The window is cut into `wheels` equal cells; `decimal_wheels` marks the rightmost ones as fractions. Dials run most significant first, `Dial(..., counterclockwise=True)` for those that turn the other way. `MeterLayout`, `Calibration` and `PlausibilityState` convert to and from JSON-compatible dicts.
+Regions are fractions of the frame after turning it by `rotation` about its centre, like `PIL.Image.rotate`. The window is cut into `wheels` equal cells; `decimal_wheels` marks the rightmost ones as fractions. Dials run most significant first, `Dial(..., counterclockwise=True)` for those that turn the other way. `MeterLayout`, `Calibration` and `PlausibilityState` convert to and from JSON-compatible dicts; `from_dict` coerces nothing and raises `MeterDataError` (a `ValueError`) for anything a meter cannot have, including naive times.
 
-Wheels and dials are composed with the carry rule, not concatenated: a wheel at 1.7 shows 1 or 2 depending on the wheels below it, so each wheel is resolved against what the lower ones contribute, and an upper wheel that jumps instead of rolling is recognized too. How badly the positions contradict each other is `reading.residual`, above `max_residual` (0.4 digits) the reading is rejected as inconsistent. The last wheel or dial keeps its fraction: a rolling last wheel reads 601.6, not 602.
+Wheels and dials are composed with the carry rule, not concatenated: a wheel at 1.7 shows 1 or 2 depending on the wheels below it, so each wheel is resolved against what the lower ones contribute, and an upper wheel that jumps instead of rolling is recognized too. The wheel right above the dials is geared to them and always read as rolling. How badly the positions contradict each other is `reading.residual`, above `max_residual` (0.4 digits) the reading is rejected as inconsistent. Near a carry an upper wheel can fit two digits about equally well, rolling just before or jumped just after; such a reading is rejected as ambiguous instead of guessed. The last wheel or dial keeps its fraction: a rolling last wheel reads 601.6, not 602.
+
+Before a crop goes to its network, its raw grey levels are checked: a blank crop (a covered wheel, an empty window), one with a large clipped white share or one mostly black is a GLARE or DARK fault, since the network's exposure normalization would stretch it into a confident digit. Dials count as faults too.
+
+`Plausibility` accepts nothing unchecked. Seed it with a value the user confirmed; until then every reading is UNCONFIRMED. A value may rise by `max_rate` units per hour since the last accepted one, also after long gaps, and may not drop. The default of 4 suits household water in m³; pass about 4000 for litres, the meter's Qmax for gas (6 m³/h for a G4) or the supply's peak power for electricity in kWh. A lower value is taken once three consecutive readings agree on it, so a meter exchange or an earlier misread settles by itself. With `period`, a counter that wraps from 99999 to 00000 counts on to 100000.
 
 `calibrate()` decides whether the meter is mounted upside down and searches the cell raster (offset, cell width and height) on one or more frames. It costs about 45 reads, 0.36 s per frame on the i5-8400T; run it at setup and after the camera moved. `calibration.agreement` is the share of the search grid that reads the same whole number, low values mean the window needs fixing. Without a calibration `read()` cuts equal upright cells.
 
@@ -118,9 +123,9 @@ Results so far, one water meter (Corona MWI: five wheels, four dials), 696 frame
 | within 0.001 m³ | 97.1 % |
 | whole m³ right | 100 % |
 | rejected with the defaults | 1.7 %, all as inconsistent |
-| rejected by `Plausibility` | none |
+| rejected by `Plausibility` | none, seeded with the first reference value |
 
-One meter, so this says the pipeline works on it, not how well it carries over to other meters.
+One meter, so this says the pipeline works on it, not how well it carries over to other meters. No upper wheel carried over in those two days; on generated frames with the last wheel between 9 and 10, about two thirds of the readings are rejected as ambiguous and none is off by a whole unit.
 
 The models were trained by the author on generated meters and the training split of the Word-Wheel Water Meter Dataset (Zhao et al., Dryad, CC0-1.0, [doi:10.5061/dryad.7d7wm3860](https://doi.org/10.5061/dryad.7d7wm3860)), with thanks to its authors. See `src/tarsius/meter/models/MODELS.md`.
 

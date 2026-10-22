@@ -21,6 +21,10 @@ class BackendMismatchError(TarsiusError, ValueError):
     """Features come from another backend than the classifier expects."""
 
 
+class MeterDataError(TarsiusError, ValueError):
+    """A meter layout, calibration, plausibility setting or state is invalid."""
+
+
 class BlankRegionError(TarsiusError, ValueError):
     """The region has nothing to compare, e.g. a plain wall or a black corner."""
 

@@ -8,15 +8,23 @@ from pathlib import Path
 import numpy as np
 import pytest
 from meter_scenes import dial_face, layout, meter_frame
-from PIL import Image, ImageFilter
+from PIL import Image, ImageDraw, ImageFilter
 
-from tarsius import BackendError, BlankFrameError, ImageError, Roi
+from tarsius import (
+    BackendError,
+    BlankFrameError,
+    ImageError,
+    MeterDataError,
+    Roi,
+)
 from tarsius.image import encode_jpeg
 from tarsius.meter import (
     Calibration,
     Dial,
+    Fault,
     MeterLayout,
     MeterReader,
+    Reading,
     Rejection,
 )
 from tarsius.meter import reader as reader_module
@@ -53,8 +61,80 @@ def test_reads_jpeg_bytes(reader: MeterReader) -> None:
 
 
 def test_rolling_last_wheel_without_dials(reader: MeterReader) -> None:
+    reading = reader.read(meter_frame("00624", (), roll=0.5), layout(dials=0))
+    assert reading.value == pytest.approx(624.5, abs=0.15)
+
+
+def test_upper_wheel_near_a_carry_is_ambiguous(reader: MeterReader) -> None:
+    # The jumped 2 at 2.0 and a coupled 1 at 1.95 fit about equally well.
     reading = reader.read(meter_frame("00629", (), roll=0.5), layout(dials=0))
-    assert reading.value == pytest.approx(629.5, abs=0.15)
+    assert reading.rejection is Rejection.AMBIGUOUS
+    assert reading.candidate == pytest.approx(629.5, abs=0.15)
+
+
+@pytest.mark.parametrize("tenths", [9.0, 9.3, 9.6, 9.9, 9.96])
+def test_wheel_above_the_dials_stays_coupled_near_a_carry(
+    reader: MeterReader, tenths: float
+) -> None:
+    # The last wheel rolls towards 8 with the dials; it must not read 8 early.
+    hundredths = tenths * 10 % 10
+    frame = meter_frame("00627", (tenths, hundredths), roll=tenths / 10)
+    reading = reader.read(frame, layout())
+    assert reading.accepted
+    assert reading.value == pytest.approx(627 + tenths / 10, abs=0.01)
+
+
+@pytest.mark.parametrize("fill", [(255, 255, 255), (0, 0, 0), (128, 128, 128)])
+def test_covered_wheel_is_a_fault(reader: MeterReader, fill: tuple[int, ...]) -> None:
+    frame = meter_frame("00627", (8.84, 8.4), roll=0.884)
+    left, top, right, bottom = layout().digits.box(frame.size)
+    pitch = (right - left) / 5
+    covered = (int(left + 2 * pitch), top, int(left + 3 * pitch), bottom)
+    ImageDraw.Draw(frame).rectangle(covered, fill=fill)
+    reading = reader.read(frame, layout())
+    assert reading.rejection is Rejection.FAULT
+    assert reading.wheels[2].fault in (Fault.GLARE, Fault.DARK)
+
+
+@pytest.mark.parametrize(
+    ("fill", "fault"), [((255, 255, 255), Fault.GLARE), ((5, 5, 5), Fault.DARK)]
+)
+def test_blank_window_is_a_fault(
+    reader: MeterReader, fill: tuple[int, ...], fault: Fault
+) -> None:
+    frame = meter_frame("00627", (8.84, 8.4), roll=0.884)
+    ImageDraw.Draw(frame).rectangle(layout().digits.box(frame.size), fill=fill)
+    reading = reader.read(frame, layout())
+    assert reading.rejection is Rejection.FAULT
+    assert reading.faults == (fault,)
+
+
+def test_glare_on_a_wheel_is_a_fault(reader: MeterReader) -> None:
+    frame = meter_frame("00627", (8.84, 8.4), roll=0.884)
+    pixels = np.asarray(frame, np.float32)
+    left, top, right, bottom = layout().digits.box(frame.size)
+    y, x = np.ogrid[: pixels.shape[0], : pixels.shape[1]]
+    centre = (left + 2.5 * (right - left) / 5, (top + bottom) / 2)
+    blob = np.clip(3 - np.hypot(x - centre[0], y - centre[1]) / 12, 0, 1)
+    pixels = np.clip(pixels + blob[..., None] * 400, 0, 255).astype(np.uint8)
+    reading = reader.read(Image.fromarray(pixels), layout())
+    assert reading.rejection is Rejection.FAULT
+    assert reading.wheels[2].fault is Fault.GLARE
+
+
+def test_covered_dial_is_a_fault(reader: MeterReader) -> None:
+    frame = meter_frame("00627", (8.84, 8.4), roll=0.884)
+    box = layout().dials[1].roi.box(frame.size)
+    ImageDraw.Draw(frame).rectangle(box, fill=(255, 255, 255))
+    reading = reader.read(frame, layout())
+    assert reading.rejection is Rejection.FAULT
+    assert reading.dials[1].fault is Fault.GLARE
+    assert reading.faults == (Fault.GLARE,)
+
+
+def test_tiny_window_is_a_fault(reader: MeterReader) -> None:
+    tiny = MeterLayout(Roi(0.5, 0.5, 0.501, 0.501), 8)
+    assert reader.read(meter_frame(), tiny).rejection is Rejection.FAULT
 
 
 def test_decimal_wheels(reader: MeterReader) -> None:
@@ -144,6 +224,30 @@ def test_contradicting_dials_are_rejected(reader: MeterReader) -> None:
     assert reading.residual > 0.4
 
 
+def _readings(*values: float, confidence: float = 0.9) -> tuple[Reading, ...]:
+    return tuple(Reading(v, confidence) for v in values)
+
+
+@pytest.mark.parametrize(("max_residual", "accepted"), [(0.5, True), (0.4, False)])
+def test_residual_at_the_limit_is_accepted(
+    max_residual: float, *, accepted: bool
+) -> None:
+    # 3.5 above 0.0 is half a digit off either way: residual exactly 0.5.
+    reading = MeterReader(max_residual=max_residual)._judge(
+        layout(wheels=2, dials=0), _readings(3.5, 0.0), ()
+    )
+    assert reading.residual == 0.5
+    assert reading.accepted is accepted
+
+
+def test_confidence_at_the_limit_is_accepted() -> None:
+    judge = MeterReader(min_confidence=0.75)._judge
+    shape = layout(wheels=2, dials=0)
+    assert judge(shape, _readings(1.0, 2.0, confidence=0.75), ()).accepted
+    low = judge(shape, _readings(1.0, 2.0, confidence=0.74), ())
+    assert low.rejection is Rejection.LOW_CONFIDENCE
+
+
 def test_low_confidence_threshold() -> None:
     strict = MeterReader(min_confidence=1.0)
     reading = strict.read(meter_frame(), layout())
@@ -206,10 +310,13 @@ def test_unloadable_model(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> No
         ({"min_confidence": 1.5}, "min_confidence"),
         ({"max_residual": 0.0}, "max_residual"),
         ({"views": 6}, "views"),
+        ({"views": 2.0}, "views"),
+        ({"min_confidence": float("nan")}, "min_confidence"),
+        ({"max_residual": "0.4"}, "max_residual"),
     ],
 )
-def test_invalid_settings(kwargs: dict[str, float], match: str) -> None:
-    with pytest.raises(ValueError, match=match):
+def test_invalid_settings(kwargs: dict[str, object], match: str) -> None:
+    with pytest.raises(MeterDataError, match=match):
         MeterReader(**kwargs)  # type: ignore[arg-type]
 
 

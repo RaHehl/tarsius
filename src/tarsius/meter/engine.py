@@ -44,6 +44,18 @@ class Fault(StrEnum):
 
 _FAULTS = tuple(Fault)
 
+# Grey spread below which a crop holds no digit or pointer: a covered wheel
+# or an empty window. Wheels on the maintainer's meter keep 20 or more.
+BLANK_STDDEV = 8.0
+# Grey levels that count as clipped white or black.
+SATURATED = 250.0
+DARK = 8.0
+# Share of clipped white above which a crop is glare. White dial faces clip
+# more in normal light than wheels do, up to 20 % on the maintainer's meter.
+WHEEL_GLARE_SHARE = 0.4
+DIAL_GLARE_SHARE = 0.85
+DARK_SHARE = 0.75
+
 
 @dataclass(frozen=True, slots=True)
 class Reading:
@@ -53,7 +65,7 @@ class Reading:
     value: float
     # 0 to 1, margin of the best digit against the best competing one.
     confidence: float
-    # Always OK for a model without a fault head.
+    # From the raw crop's exposure, else the fault head; OK without one.
     fault: Fault = Fault.OK
     # Probability that the crop is turned 180 degrees, 0 without that head.
     upside_down: float = 0.0
@@ -104,6 +116,24 @@ def decode(probs: npt.NDArray[np.floating]) -> tuple[float, float]:
     own = float(w.sum())
     rival = float(probs[~band].max())
     return value, min(1.0, own / (own + rival * 3.0 + 1e-9))
+
+
+def exposure_fault(image: Array, *, glare_share: float = WHEEL_GLARE_SHARE) -> Fault:
+    """
+    Return GLARE or DARK when a raw ``(H, W, 3)`` crop cannot show a digit.
+
+    Checked before the network normalizes exposure: stretched to the same
+    contrast, a blank or clipped crop looks like any other and can read as a
+    confident digit.
+    """
+    grey = image.mean(axis=2)
+    if float(grey.std()) < BLANK_STDDEV:
+        return Fault.GLARE if float(grey.mean()) >= 128.0 else Fault.DARK
+    if float((grey >= SATURATED).mean()) > glare_share:
+        return Fault.GLARE
+    if float((grey <= DARK).mean()) > DARK_SHARE:
+        return Fault.DARK
+    return Fault.OK
 
 
 def _views(image: Array, count: int) -> Iterator[Array]:
@@ -188,12 +218,16 @@ class Model:
                 raise ValueError(f"unknown op {op!r}")
         return y
 
-    def inspect(self, image: Array, *, views: int = 1) -> Reading:
+    def inspect(
+        self, image: Array, *, views: int = 1, glare_share: float = WHEEL_GLARE_SHARE
+    ) -> Reading:
         """
         Read one crop, resized to ``input_hw`` by the caller.
 
         ``views`` above one averages the distributions of the crop and up to
-        four one-pixel shifts of it, which removes some gross errors.
+        four one-pixel shifts of it, which removes some gross errors. A crop
+        that :func:`exposure_fault` finds blank, dark or clipped beyond
+        ``glare_share`` gets that fault whatever the fault head says.
         """
         value_sum: Array | None = None
         fault_sum: Array | None = None
@@ -211,8 +245,8 @@ class Model:
                 orient_sum = orient if orient_sum is None else orient_sum + orient
         assert value_sum is not None
         value_pos, confidence = decode(value_sum / count)
-        fault = Fault.OK
-        if fault_sum is not None:
+        fault = exposure_fault(image, glare_share=glare_share)
+        if fault is Fault.OK and fault_sum is not None:
             fault = _FAULTS[int(np.argmax(fault_sum))]
         flip = float(orient_sum[1] / count) if orient_sum is not None else 0.0
         return Reading(value_pos, confidence, fault, flip)

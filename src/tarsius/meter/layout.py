@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
+from ..errors import MeterDataError
 from ..roi import Roi
+from . import checks
 
 # More wheels than any utility meter has; guards against a typo in a form.
 MAX_WHEELS = 12
@@ -20,6 +22,12 @@ class Dial:
     roi: Roi
     # The pointer turns counter-clockwise, read as its mirror image.
     counterclockwise: bool = False
+
+    def __post_init__(self) -> None:
+        """Reject a region that is not a Roi or a flag that is not a bool."""
+        if not isinstance(self.roi, Roi):
+            raise MeterDataError(f"dial region must be a Roi, got {self.roi!r}")
+        checks.flag(self.counterclockwise, "counterclockwise")
 
 
 @dataclass(frozen=True, slots=True)
@@ -44,22 +52,40 @@ class MeterLayout:
     rotation: float = 0.0
 
     def __post_init__(self) -> None:
-        """Reject layouts no meter has."""
-        if not 1 <= self.wheels <= MAX_WHEELS:
-            raise ValueError(f"wheels must be 1 to {MAX_WHEELS}")
-        if not 0 <= self.decimal_wheels <= self.wheels:
-            raise ValueError("decimal_wheels must be 0 to the number of wheels")
-        if len(self.dials) > MAX_DIALS:
-            raise ValueError(f"at most {MAX_DIALS} dials")
-        if not -360.0 <= self.rotation <= 360.0:
-            raise ValueError("rotation must be within -360 to 360 degrees")
+        """Reject layouts no meter has; raises MeterDataError."""
+        if not isinstance(self.digits, Roi):
+            raise MeterDataError(f"digits must be a Roi, got {self.digits!r}")
+        if not 1 <= checks.integer(self.wheels, "wheels") <= MAX_WHEELS:
+            raise MeterDataError(f"wheels must be 1 to {MAX_WHEELS}")
+        decimal_wheels = checks.integer(self.decimal_wheels, "decimal_wheels")
+        if not 0 <= decimal_wheels <= self.wheels:
+            raise MeterDataError("decimal_wheels must be 0 to the number of wheels")
         # A tuple keeps the layout hashable, a list from JSON would not.
         object.__setattr__(self, "dials", tuple(self.dials))
+        if len(self.dials) > MAX_DIALS:
+            raise MeterDataError(f"at most {MAX_DIALS} dials")
+        for dial in self.dials:
+            if not isinstance(dial, Dial):
+                raise MeterDataError(f"dials must be Dial objects, got {dial!r}")
+        rotation = checks.number(self.rotation, "rotation")
+        if not -360.0 <= rotation <= 360.0:
+            raise MeterDataError("rotation must be within -360 to 360 degrees")
+        object.__setattr__(self, "rotation", rotation)
 
     @property
     def decimals(self) -> int:
         """Return the number of places after the point the wheels and dials show."""
         return self.decimal_wheels + len(self.dials)
+
+    @property
+    def period(self) -> float:
+        """
+        Return the value at which the counter wraps to zero.
+
+        Five whole wheels count up to 99999.x and then show 00000 again, so
+        the period is 100000; pass it to :class:`Plausibility`.
+        """
+        return float(10 ** (self.wheels - self.decimal_wheels))
 
     def as_dict(self) -> dict[str, Any]:
         """Return a JSON-compatible form, e.g. for a config entry."""
@@ -76,20 +102,37 @@ class MeterLayout:
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> MeterLayout:
-        """Rebuild a layout from :meth:`as_dict`; raises ValueError if invalid."""
+        """
+        Rebuild a layout from :meth:`as_dict`.
+
+        Raises MeterDataError, or RoiError for a region outside the frame;
+        both are ValueErrors. Nothing is coerced: ``"false"`` is no bool and
+        5.9 no wheel count.
+        """
         try:
+            data = checks.mapping(data, "meter layout")
+            dials = data.get("dials", [])
+            if isinstance(dials, str | bytes | Mapping) or not isinstance(
+                dials, Sequence
+            ):
+                raise MeterDataError(f"dials must be a list, got {dials!r}")
             return cls(
-                digits=Roi(*(float(v) for v in data["digits"])),
-                wheels=int(data["wheels"]),
-                dials=tuple(
-                    Dial(
-                        Roi(*(float(v) for v in dial["roi"])),
-                        bool(dial.get("counterclockwise", False)),
-                    )
-                    for dial in data.get("dials", ())
+                digits=checks.roi(data["digits"], "digits"),
+                wheels=checks.integer(data["wheels"], "wheels"),
+                dials=tuple(_dial(checks.mapping(d, "dial")) for d in dials),
+                decimal_wheels=checks.integer(
+                    data.get("decimal_wheels", 0), "decimal_wheels"
                 ),
-                decimal_wheels=int(data.get("decimal_wheels", 0)),
-                rotation=float(data.get("rotation", 0.0)),
+                rotation=checks.number(data.get("rotation", 0.0), "rotation"),
             )
-        except (KeyError, TypeError) as err:
-            raise ValueError(f"invalid meter layout: {err!r}") from err
+        except KeyError as err:
+            raise MeterDataError(f"invalid meter layout: missing {err}") from err
+        except MeterDataError as err:
+            raise MeterDataError(f"invalid meter layout: {err}") from err
+
+
+def _dial(data: Mapping[str, Any]) -> Dial:
+    return Dial(
+        checks.roi(data["roi"], "dial region"),
+        checks.flag(data.get("counterclockwise", False), "counterclockwise"),
+    )

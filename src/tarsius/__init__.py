@@ -1,4 +1,4 @@
-"""Local, training-free state detection for a region of a camera image."""
+"""Local state detection and utility meter reading for regions of a camera image."""
 
 from importlib.metadata import version
 
@@ -12,6 +12,7 @@ from .errors import (
     BlankFrameError,
     BlankRegionError,
     ImageError,
+    MeterDataError,
     RoiError,
     TarsiusError,
 )
@@ -36,6 +37,7 @@ __all__ = [
     "Features",
     "ImageError",
     "LoadReport",
+    "MeterDataError",
     "NcnnBackend",
     "Prepared",
     "Result",

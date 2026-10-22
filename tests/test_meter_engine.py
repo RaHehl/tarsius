@@ -9,7 +9,7 @@ import pytest
 
 from tarsius import BackendError
 from tarsius.meter import Fault
-from tarsius.meter.engine import Model, decode
+from tarsius.meter.engine import DIAL_GLARE_SHARE, Model, decode, exposure_fault
 
 
 def _model(arch: list[dict[str, object]], arrays: dict[str, np.ndarray]) -> io.BytesIO:
@@ -96,3 +96,44 @@ def test_decode_competing_digit_lowers_confidence() -> None:
     probs[70] = 0.4
     _, confidence = decode(probs)
     assert confidence < 0.4
+
+
+def _crop(rng_seed: int = 2) -> np.ndarray:
+    return (
+        np.random.default_rng(rng_seed).uniform(40, 200, (32, 20, 3)).astype(np.float32)
+    )
+
+
+def test_exposure_ok_on_a_textured_crop() -> None:
+    assert exposure_fault(_crop()) is Fault.OK
+
+
+@pytest.mark.parametrize(
+    ("level", "fault"), [(255.0, Fault.GLARE), (128.0, Fault.GLARE), (3.0, Fault.DARK)]
+)
+def test_exposure_blank_crop(level: float, fault: Fault) -> None:
+    crop = np.full((32, 20, 3), level, np.float32)
+    crop += np.random.default_rng(3).normal(0, 2, crop.shape).astype(np.float32)
+    assert exposure_fault(crop) is fault
+
+
+def test_exposure_clipped_share() -> None:
+    crop = _crop()
+    crop[:14] = 255.0
+    assert exposure_fault(crop) is Fault.GLARE
+    # Dial faces are white: the same share is normal there.
+    assert exposure_fault(crop, glare_share=DIAL_GLARE_SHARE) is Fault.OK
+
+
+def test_exposure_dark_share() -> None:
+    crop = _crop()
+    crop[:26] = 0.0
+    assert exposure_fault(crop) is Fault.DARK
+
+
+def test_exposure_fault_overrides_the_fault_head() -> None:
+    model = Model.load(_skip_model(100))
+    blank = np.full((4, 4, 3), 250.0, np.float32)
+    reading = model.inspect(blank)
+    assert reading.fault is Fault.GLARE
+    assert 0 <= reading.value < 10

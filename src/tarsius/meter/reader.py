@@ -12,9 +12,10 @@ from importlib.resources import files
 import numpy as np
 from PIL import Image
 
-from ..errors import BackendError
+from ..errors import BackendError, MeterDataError
+from . import checks
 from .compose import compose
-from .engine import Fault, Model, Reading
+from .engine import DIAL_GLARE_SHARE, Fault, Model, Reading
 from .frame import crop, decode_frame
 from .layout import MeterLayout
 from .strip import Calibration, calibrate, cells, read_cells
@@ -30,16 +31,20 @@ MAX_RESIDUAL = 0.4
 class Rejection(StrEnum):
     """Why a reading has no value."""
 
-    # A wheel reports a capture fault: focus, glare, dark or offset.
+    # A wheel or dial shows a capture fault: focus, glare, dark or offset.
     FAULT = "fault"
     # A wheel or dial is not sure enough of its digit.
     LOW_CONFIDENCE = "low_confidence"
     # The wheels and dials contradict each other under the carry rule.
     INCONSISTENT = "inconsistent"
+    # An upper wheel near a carry fits two digits about equally well.
+    AMBIGUOUS = "ambiguous"
     # Lower than the last accepted value, from Plausibility.
     DECREASED = "decreased"
     # Rose faster than the meter can count, from Plausibility.
     TOO_FAST = "too_fast"
+    # No confirmed value to compare against yet, from Plausibility.
+    UNCONFIRMED = "unconfirmed"
 
 
 @dataclass(frozen=True, slots=True)
@@ -67,8 +72,10 @@ class MeterReading:
 
     @property
     def faults(self) -> tuple[Fault, ...]:
-        """Return the distinct capture faults of the wheels, worst first."""
-        found = {r.fault for r in self.wheels if r.fault is not Fault.OK}
+        """Return the distinct capture faults of wheels and dials, worst first."""
+        found = {
+            r.fault for r in (*self.wheels, *self.dials) if r.fault is not Fault.OK
+        }
         return tuple(f for f in Fault if f in found)
 
     def rejected(self, rejection: Rejection) -> MeterReading:
@@ -121,12 +128,12 @@ class MeterReader:
         ``max_residual`` digits. ``views`` of 2 to 5 also reads every crop
         shifted by a pixel and averages, which costs as many times the time.
         """
-        if not 0.0 <= min_confidence <= 1.0:
-            raise ValueError("min_confidence must be 0 to 1")
-        if not 0.0 < max_residual <= 0.5:
-            raise ValueError("max_residual must be above 0 and at most 0.5")
-        if not 1 <= views <= 5:
-            raise ValueError("views must be 1 to 5")
+        if not 0.0 <= checks.number(min_confidence, "min_confidence") <= 1.0:
+            raise MeterDataError("min_confidence must be 0 to 1")
+        if not 0.0 < checks.number(max_residual, "max_residual") <= 0.5:
+            raise MeterDataError("max_residual must be above 0 and at most 0.5")
+        if not 1 <= checks.integer(views, "views") <= 5:
+            raise MeterDataError("views must be 1 to 5")
         self._min_confidence = min_confidence
         self._max_residual = max_residual
         self._views = views
@@ -194,7 +201,11 @@ class MeterReader:
                 pixels = np.asarray(
                     face.resize((w, h), Image.Resampling.BILINEAR), np.float32
                 )
-                dials.append(model.inspect(pixels, views=self._views))
+                dials.append(
+                    model.inspect(
+                        pixels, views=self._views, glare_share=DIAL_GLARE_SHARE
+                    )
+                )
         return self._judge(layout, tuple(wheels), tuple(dials))
 
     def _judge(
@@ -224,4 +235,6 @@ class MeterReader:
             return reading.rejected(Rejection.LOW_CONFIDENCE)
         if composition.residual > self._max_residual:
             return reading.rejected(Rejection.INCONSISTENT)
+        if composition.ambiguous:
+            return reading.rejected(Rejection.AMBIGUOUS)
         return reading

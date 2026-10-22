@@ -1,13 +1,15 @@
 from __future__ import annotations
 
 import json
+from typing import Any
 
 import pytest
 
-from tarsius import Roi, RoiError
+from tarsius import MeterDataError, Roi, RoiError
 from tarsius.meter import Calibration, Dial, MeterLayout, Raster
 
 WINDOW = Roi.from_percent(45, 13, 78, 28)
+DIAL = [0.1, 0.1, 0.2, 0.2]
 
 
 def test_round_trip_through_json() -> None:
@@ -66,3 +68,101 @@ def test_calibration_round_trip() -> None:
 def test_invalid_calibration() -> None:
     with pytest.raises(ValueError, match="invalid calibration"):
         Calibration.from_dict({"offset": 0.0})
+
+
+def test_period_counts_whole_wheels() -> None:
+    assert MeterLayout(WINDOW, 5).period == 100000.0
+    assert MeterLayout(WINDOW, 8, decimal_wheels=3).period == 100000.0
+    assert MeterLayout(WINDOW, 5, (Dial(Roi()),)).period == 100000.0
+
+
+@pytest.mark.parametrize(
+    ("change", "match"),
+    [
+        ({"wheels": 5.9}, "wheels must be an integer"),
+        ({"wheels": "5"}, "wheels must be an integer"),
+        ({"wheels": True}, "wheels must be an integer"),
+        ({"decimal_wheels": 1.0}, "decimal_wheels must be an integer"),
+        (
+            {"dials": [{"roi": [0.1, 0.1, 0.2, 0.2], "counterclockwise": "false"}]},
+            "counterclockwise",
+        ),
+        (
+            {"dials": [{"roi": [0.1, 0.1, 0.2, 0.2], "counterclockwise": 0}]},
+            "counterclockwise",
+        ),
+        ({"dials": [5]}, "dial must be a mapping"),
+        ({"dials": [{}]}, "missing"),
+        ({"dials": None}, "dials must be a list"),
+        ({"dials": "abc"}, "dials must be a list"),
+        ({"digits": [0.1, 0.1, 0.5, 0.3, 0.9]}, "four numbers"),
+        ({"digits": "0.1"}, "four numbers"),
+        ({"digits": [0, 0, 1, float("nan")]}, "finite"),
+        ({"digits": [0, 0, 1, "1"]}, "must be a number"),
+        ({"rotation": "inf"}, "rotation must be a number"),
+        ({"rotation": float("inf")}, "finite"),
+    ],
+)
+def test_dict_values_are_not_coerced(change: dict[str, Any], match: str) -> None:
+    data = MeterLayout(WINDOW, 5).as_dict() | change
+    with pytest.raises(MeterDataError, match=f"invalid meter layout: .*{match}"):
+        MeterLayout.from_dict(data)
+
+
+@pytest.mark.parametrize("data", ["abc", None, 5])
+def test_layout_dict_must_be_a_mapping(data: Any) -> None:
+    with pytest.raises(MeterDataError, match="must be a mapping"):
+        MeterLayout.from_dict(data)
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "match"),
+    [
+        ({"digits": (0.1, 0.1, 0.5, 0.3)}, "digits must be a Roi"),
+        ({"dials": ((0.1, 0.1, 0.2, 0.2),)}, "Dial objects"),
+        ({"rotation": float("nan")}, "rotation"),
+    ],
+)
+def test_invalid_layout_objects(kwargs: dict[str, Any], match: str) -> None:
+    settings: dict[str, Any] = {"digits": WINDOW, "wheels": 5} | kwargs
+    with pytest.raises(MeterDataError, match=match):
+        MeterLayout(**settings)
+
+
+def test_invalid_dial() -> None:
+    with pytest.raises(MeterDataError, match="dial region must be a Roi"):
+        Dial((0.1, 0.1, 0.2, 0.2))  # type: ignore[arg-type]
+    with pytest.raises(MeterDataError, match="counterclockwise"):
+        Dial(Roi(), "yes")  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(
+    ("change", "match"),
+    [
+        ({"offset": float("nan")}, "offset must be finite"),
+        ({"offset": 0.6}, "offset must be"),
+        ({"width": -5}, "width must be"),
+        ({"width": 1e9}, "width must be"),
+        ({"height": 0}, "height must be"),
+        ({"height": "1"}, "height must be a number"),
+        ({"upside_down": "no"}, "upside_down"),
+        ({"upside_down": 0}, "upside_down"),
+        ({"score": 2.0}, "score"),
+        ({"agreement": -0.1}, "agreement"),
+        ({"orientation_margin": float("inf")}, "orientation_margin"),
+    ],
+)
+def test_calibration_values_are_checked(change: dict[str, Any], match: str) -> None:
+    data = Calibration().as_dict() | change
+    with pytest.raises(MeterDataError, match=f"invalid calibration: {match}"):
+        Calibration.from_dict(data)
+
+
+def test_calibration_dict_must_be_a_mapping() -> None:
+    with pytest.raises(MeterDataError, match="must be a mapping"):
+        Calibration.from_dict(5)  # type: ignore[arg-type]
+
+
+def test_calibration_needs_a_raster() -> None:
+    with pytest.raises(MeterDataError, match="raster must be a Raster"):
+        Calibration((0.0, 1.0, 1.0))  # type: ignore[arg-type]

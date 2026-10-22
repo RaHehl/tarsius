@@ -14,6 +14,8 @@ from typing import Any
 import numpy as np
 from PIL import Image
 
+from ..errors import MeterDataError
+from . import checks
 from .compose import compose
 from .engine import Model, Reading
 
@@ -39,6 +41,12 @@ class Raster:
     # Cell height as a fraction of the window height.
     height: float = 1.0
 
+    def __post_init__(self) -> None:
+        """Reject rasters that cut no sensible cells; raises MeterDataError."""
+        checks.within(checks.number(self.offset, "offset"), -0.5, 0.5, "offset")
+        checks.within(checks.number(self.width, "width"), 0.1, 1.0, "width")
+        checks.within(checks.number(self.height, "height"), 0.1, 1.0, "height")
+
 
 @dataclass(frozen=True, slots=True)
 class Calibration:
@@ -61,6 +69,15 @@ class Calibration:
     # when the readings are wrong; low values mean the window needs fixing.
     agreement: float = 0.0
 
+    def __post_init__(self) -> None:
+        """Reject values a calibration cannot have; raises MeterDataError."""
+        if not isinstance(self.raster, Raster):
+            raise MeterDataError(f"raster must be a Raster, got {self.raster!r}")
+        checks.flag(self.upside_down, "upside_down")
+        checks.number(self.orientation_margin, "orientation_margin")
+        checks.within(checks.number(self.score, "score"), 0.0, 1.0, "score")
+        checks.within(checks.number(self.agreement, "agreement"), 0.0, 1.0, "agreement")
+
     def as_dict(self) -> dict[str, Any]:
         """Return a JSON-compatible form."""
         return {
@@ -75,19 +92,20 @@ class Calibration:
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> Calibration:
-        """Rebuild a calibration from :meth:`as_dict`; raises ValueError if invalid."""
+        """Rebuild a calibration from :meth:`as_dict`; raises MeterDataError."""
         try:
+            data = checks.mapping(data, "calibration")
             return cls(
-                Raster(
-                    float(data["offset"]), float(data["width"]), float(data["height"])
-                ),
-                bool(data["upside_down"]),
-                float(data.get("orientation_margin", 0.0)),
-                float(data.get("score", 0.0)),
-                float(data.get("agreement", 0.0)),
+                Raster(data["offset"], data["width"], data["height"]),
+                data["upside_down"],
+                data.get("orientation_margin", 0.0),
+                data.get("score", 0.0),
+                data.get("agreement", 0.0),
             )
-        except (KeyError, TypeError) as err:
-            raise ValueError(f"invalid calibration: {err!r}") from err
+        except KeyError as err:
+            raise MeterDataError(f"invalid calibration: missing {err}") from err
+        except MeterDataError as err:
+            raise MeterDataError(f"invalid calibration: {err}") from err
 
 
 GRID = tuple(Raster(o, w, h) for o in OFFSETS for w in WIDTHS for h in HEIGHTS)
@@ -102,16 +120,11 @@ def cells(window: Image.Image, wheels: int, raster: Raster) -> list[Image.Image]
     out = []
     for i in range(wheels):
         cx = pitch * (i + 0.5 + raster.offset)
-        out.append(
-            window.crop(
-                (
-                    int(cx - cell_w / 2),
-                    int(y0),
-                    int(cx + cell_w / 2),
-                    int(y0 + cell_h),
-                )
-            )
-        )
+        left, top = int(cx - cell_w / 2), int(y0)
+        # At least one pixel, so a tiny window is judged blank, not an error.
+        right = max(int(cx + cell_w / 2), left + 1)
+        bottom = max(int(y0 + cell_h), top + 1)
+        out.append(window.crop((left, top, right, bottom)))
     return out
 
 
