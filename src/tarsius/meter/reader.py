@@ -11,7 +11,7 @@ from importlib.resources import files
 
 import numpy as np
 import numpy.typing as npt
-from PIL import Image
+from PIL import Image, ImageStat
 
 from ..errors import BackendError, MeterDataError
 from . import checks
@@ -32,6 +32,10 @@ from .strip import Calibration, calibrate, cells, median_exposure, pixels
 DIGITS_MODEL = "digits.npz"
 DIALS_MODEL = "dials.npz"
 
+# Accepted readings this sure of every digit move the exposure baseline by
+# ADAPT_RATE each: half way in about 14 readings.
+ADAPT_CONFIDENCE = 0.7
+ADAPT_RATE = 0.05
 # Defaults chosen on the maintainer's meter, see the README.
 MIN_CONFIDENCE = 0.5
 MAX_RESIDUAL = 0.4
@@ -76,6 +80,8 @@ class MeterReading:
     # Other values the wheels allow near a carry, best fit first, within
     # max_residual; Plausibility picks the one that fits the last value.
     alternatives: tuple[float, ...] = ()
+    # Mean grey of the frame, 0 when unknown; see MeterReader.adapt().
+    light: float = 0.0
 
     @property
     def accepted(self) -> bool:
@@ -174,18 +180,23 @@ class MeterReader:
         windows = [crop(f, layout.digits, layout.rotation) for f in decoded]
         model = _SHARED.get(DIGITS_MODEL)
         calibration = calibrate(model, windows, layout.wheels)
-        # What each wheel and dial looks like now, to tell glare from a drum.
+        # What each wheel and dial looks like now, to tell glare from a drum,
+        # each frame scaled to the frames' middle light level.
+        lights = [_light(frame) for frame in decoded]
+        light = float(np.median(lights))
         samples = [
             [
-                Exposure.of(p)
+                _exposure(p, light / level)
                 for p in (
                     *self._wheel_pixels(window, layout, calibration),
                     *self._dial_pixels(frame, layout, calibration),
                 )
             ]
-            for frame, window in zip(decoded, windows, strict=True)
+            for frame, window, level in zip(decoded, windows, lights, strict=True)
         ]
-        return dataclasses.replace(calibration, exposure=median_exposure(samples))
+        return dataclasses.replace(
+            calibration, exposure=median_exposure(samples), light=light
+        )
 
     def read(
         self,
@@ -200,33 +211,74 @@ class MeterReader:
         that shows nothing and BackendError if a reader cannot load. Without
         ``calibration`` the window is cut into equal cells, upright, and
         exposure faults use fixed limits instead of the calibrated look.
+        Each crop's exposure is taken at the calibration's light level.
         """
         calibration = calibration or Calibration()
         frame = decode_frame(image)
+        light = _light(frame)
+        scale = calibration.light / light if calibration.light else 1.0
         window = crop(frame, layout.digits, layout.rotation)
         digits = _SHARED.get(DIGITS_MODEL)
-        wheels = [
-            digits.inspect(p, views=self._views)
-            for p in self._wheel_pixels(window, layout, calibration)
-        ]
+        wheel_pixels = self._wheel_pixels(window, layout, calibration)
+        wheels = [digits.inspect(p, views=self._views) for p in wheel_pixels]
+        dial_pixels = self._dial_pixels(frame, layout, calibration)
         dials: list[Reading] = []
         if layout.dials:
             model = _SHARED.get(DIALS_MODEL)
-            dials = [
-                model.inspect(p, views=self._views)
-                for p in self._dial_pixels(frame, layout, calibration)
-            ]
+            dials = [model.inspect(p, views=self._views) for p in dial_pixels]
+        readings = (*wheels, *dials)
+        scaled = [_exposure(p, scale) for p in (*wheel_pixels, *dial_pixels)]
         baseline: tuple[Exposure | None, ...] = calibration.exposure
-        if len(baseline) != layout.wheels + len(layout.dials):
-            baseline = (None,) * (layout.wheels + len(layout.dials))
-        shares = (GLARE_SHARE,) * layout.wheels + (DIAL_GLARE_SHARE,) * len(dials)
+        if len(baseline) != len(readings):
+            baseline = (None,) * len(readings)
+        shares = glare_shares(layout)
         checked = [
-            _exposed(r, base, share)
-            for r, base, share in zip((*wheels, *dials), baseline, shares, strict=True)
+            _exposed(r, exposure, base, share)
+            for r, exposure, base, share in zip(
+                readings, scaled, baseline, shares, strict=True
+            )
         ]
-        return self._judge(
+        reading = self._judge(
             layout, tuple(checked[: layout.wheels]), tuple(checked[layout.wheels :])
         )
+        return dataclasses.replace(reading, light=light)
+
+    def adapt(self, calibration: Calibration, reading: MeterReading) -> Calibration:
+        """
+        Return the calibration with its exposure moved towards a reading's.
+
+        Pass readings that were accepted, by Plausibility as well; others,
+        and unsure, faulted or poorly fitting ones, leave it unchanged. Each
+        such reading moves the baseline by ADAPT_RATE, so slow changes of
+        the scene are learnt while a sudden glare spot still stands out. A
+        calibration without exposure takes the reading's as it is. Store
+        the result in place of the calibration.
+        """
+        if (
+            reading.value is None
+            or reading.faults
+            or reading.confidence < ADAPT_CONFIDENCE
+            or reading.residual > self._max_residual / 2
+        ):
+            return calibration
+        current = [r.exposure for r in (*reading.wheels, *reading.dials)]
+        if any(e is None for e in current) or not reading.light:
+            return calibration
+        observed = [e for e in current if e is not None]
+        if len(calibration.exposure) != len(observed) or not calibration.light:
+            return dataclasses.replace(
+                calibration, exposure=tuple(observed), light=reading.light
+            )
+        moved = tuple(
+            Exposure(
+                *(
+                    old + ADAPT_RATE * (new - old)
+                    for old, new in zip(base.as_list(), now.as_list(), strict=True)
+                )
+            )
+            for base, now in zip(calibration.exposure, observed, strict=True)
+        )
+        return dataclasses.replace(calibration, exposure=moved)
 
     @staticmethod
     def _wheel_pixels(
@@ -297,14 +349,41 @@ class MeterReader:
 
 
 def _exposed(
-    reading: Reading, baseline: Exposure | None, glare_share: float
+    reading: Reading,
+    exposure: Exposure,
+    baseline: Exposure | None,
+    glare_share: float,
 ) -> Reading:
-    """Return the reading with the fault its raw exposure shows, if any."""
-    if reading.exposure is None:
-        return reading
+    """
+    Return the reading with its scaled exposure and the fault it shows.
+
+    ``reading.exposure`` is the crop as the camera saw it, ``exposure`` the
+    same scaled to the calibration's light level.
+    """
     fault = exposure_fault(
-        reading.exposure, baseline, reading.confidence, glare_share=glare_share
+        exposure,
+        baseline,
+        reading.confidence,
+        glare_share=glare_share,
+        raw=reading.exposure,
     )
     if fault is Fault.OK:
-        return reading
-    return dataclasses.replace(reading, fault=fault)
+        return dataclasses.replace(reading, exposure=exposure)
+    return dataclasses.replace(reading, exposure=exposure, fault=fault)
+
+
+def glare_shares(layout: MeterLayout) -> tuple[float, ...]:
+    """Return the clipped share allowed without a calibration, wheels then dials."""
+    return (GLARE_SHARE,) * layout.wheels + (DIAL_GLARE_SHARE,) * len(layout.dials)
+
+
+def _light(frame: Image.Image) -> float:
+    """Return the mean grey level of a frame, at least 1."""
+    return max(1.0, float(ImageStat.Stat(frame.convert("L")).mean[0]))
+
+
+def _exposure(pixels: npt.NDArray[np.float32], scale: float) -> Exposure:
+    """Return a crop's exposure as if lit ``scale`` times as bright."""
+    if scale == 1.0:
+        return Exposure.of(pixels)
+    return Exposure.of(np.clip(pixels * np.float32(scale), 0.0, 255.0))

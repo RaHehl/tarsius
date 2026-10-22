@@ -49,8 +49,9 @@ _FAULTS = tuple(Fault)
 # or an empty window. A thin digit at 20 grey levels of contrast keeps 3.5,
 # the maintainer's wheels 20 or more.
 BLANK_STDDEV = 3.0
-# Below this share of its calibrated spread a crop is blank too.
-BLANK_SHARE = 0.25
+# Below this share of its calibrated spread a crop is blank too; fogged
+# glass keeps a fifth, a faint drum a tenth.
+BLANK_SHARE = 0.05
 # Grey levels that count as clipped white or crushed black.
 SATURATED = 250.0
 DARK = 8.0
@@ -112,21 +113,25 @@ def exposure_fault(
     confidence: float,
     *,
     glare_share: float = GLARE_SHARE,
+    raw: Exposure | None = None,
 ) -> Fault:
     """
     Return GLARE or DARK when a crop's exposure hides its digit, else OK.
 
     Normalized to the same contrast, a blank or clipped crop looks like any
     other and can read as a confident digit, so this looks at the raw crop.
-    ``baseline`` is the crop's exposure at calibration; without it only a
+    ``baseline`` is the crop's exposure at calibration, ``exposure`` scaled
+    to its light level and ``raw`` as the camera saw it, if different: a
+    crop is blank when the camera saw no contrast. Without a baseline only a
     blank crop, or a clipped one the reader is unsure of, is a fault;
     ``glare_share`` is the clipped share allowed then.
     """
-    blank = exposure.spread < BLANK_STDDEV or (
+    seen = raw or exposure
+    blank = seen.spread < BLANK_STDDEV or (
         baseline is not None and exposure.spread < baseline.spread * BLANK_SHARE
     )
     if blank:
-        return Fault.GLARE if exposure.level >= 128.0 else Fault.DARK
+        return Fault.GLARE if seen.level >= 128.0 else Fault.DARK
     if baseline is not None:
         if (
             exposure.white - baseline.white > GLARE_RISE

@@ -122,8 +122,8 @@ def test_exposure_blank_crop(level: float, fault: Fault) -> None:
 
 
 def test_exposure_blank_against_the_calibration() -> None:
-    baseline = Exposure(spread=60.0, light=0.3, level=90.0)
-    faint = Exposure(spread=10.0, light=0.3, level=90.0)
+    baseline = Exposure(spread=80.0, light=0.3, level=90.0)
+    faint = Exposure(spread=3.5, light=0.3, level=90.0)
     assert exposure_fault(faint, None, 1.0) is Fault.OK
     assert exposure_fault(faint, baseline, 1.0) is Fault.DARK
 

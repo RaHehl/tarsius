@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 from concurrent.futures import ThreadPoolExecutor
 from importlib.resources import files
@@ -21,6 +22,7 @@ from tarsius.image import encode_jpeg
 from tarsius.meter import (
     Calibration,
     Dial,
+    Exposure,
     Fault,
     MeterLayout,
     MeterReader,
@@ -355,9 +357,13 @@ def test_calibration_of_another_layout_has_no_baseline(reader: MeterReader) -> N
     assert reader.read(frame, layout(dials=0), calibration).faults == (Fault.GLARE,)
 
 
-def test_reading_without_exposure_keeps_its_fault() -> None:
-    reading = Reading(1.0, 0.9)
-    assert reader_module._exposed(reading, None, 0.4) is reading
+def test_blank_is_judged_on_the_raw_crop() -> None:
+    # Scaled up from a dim frame a flat crop gains no contrast it lacked.
+    raw = Exposure(spread=2.0, level=40.0)
+    scaled = Exposure(spread=6.0, level=120.0)
+    checked = reader_module._exposed(Reading(1.0, 0.9, exposure=raw), scaled, None, 0.4)
+    assert checked.fault is Fault.DARK
+    assert checked.exposure == scaled
 
 
 def test_readings_offer_alternatives_near_a_carry(reader: MeterReader) -> None:
@@ -368,3 +374,73 @@ def test_readings_offer_alternatives_near_a_carry(reader: MeterReader) -> None:
         620,
         630,
     }
+
+
+def test_dials_allow_more_clipped_white_without_calibration(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # White dial faces clip 60 % here; unsure readings fault only on wheels.
+    def unsure(_model: object, image: np.ndarray, *, views: int = 1) -> Reading:
+        return Reading(1.0, 0.6)
+
+    monkeypatch.setattr(reader_module.Model, "inspect", unsure)
+    reading = MeterReader().read(meter_frame("00627", (8.84, 8.4), seed=0), layout())
+    assert [d.exposure.white > 0.4 for d in reading.dials if d.exposure] == [True] * 2
+    assert reading.faults == ()
+
+
+def test_glare_shares() -> None:
+    assert reader_module.glare_shares(layout()) == (0.4,) * 5 + (0.85,) * 2
+
+
+def test_exposure_is_taken_at_the_calibrated_light(reader: MeterReader) -> None:
+    frame = meter_frame("00627", (8.84, 8.4), roll=0.884)
+    calibration = reader.calibrate(frame, layout())
+    assert calibration.light > 0
+    dim = Image.fromarray((np.asarray(frame) * 0.3).astype(np.uint8))
+    reading = reader.read(dim, layout(), calibration)
+    assert reading.accepted
+    assert reading.light == pytest.approx(calibration.light * 0.3, rel=0.05)
+    first = reading.wheels[0].exposure
+    assert first is not None
+    assert first.level == pytest.approx(calibration.exposure[0].level, rel=0.1)
+
+
+def test_adapt_moves_the_baseline_slowly(reader: MeterReader) -> None:
+    frame = meter_frame("00627", (8.84, 8.4), roll=0.884)
+    calibration = reader.calibrate(frame, layout())
+    brighter = Image.fromarray(
+        np.clip(np.asarray(frame) * 1.0 + 30, 0, 255).astype(np.uint8)
+    )
+    reading = reader.read(brighter, layout(), calibration)
+    adapted = reader.adapt(calibration, reading)
+    old, new = calibration.exposure[0], adapted.exposure[0]
+    observed = reading.wheels[0].exposure
+    assert observed is not None
+    assert new.level == pytest.approx(old.level + 0.05 * (observed.level - old.level))
+    assert adapted.light == calibration.light
+
+
+def test_adapt_fills_an_old_calibration(reader: MeterReader) -> None:
+    frame = meter_frame("00627", (8.84, 8.4), roll=0.884)
+    old = Calibration()
+    reading = reader.read(frame, layout(), old)
+    adapted = reader.adapt(old, reading)
+    assert adapted.light == reading.light
+    assert adapted.exposure == tuple(
+        r.exposure for r in (*reading.wheels, *reading.dials)
+    )
+
+
+def test_adapt_ignores_doubtful_readings(reader: MeterReader) -> None:
+    frame = meter_frame("00627", (8.84, 8.4), roll=0.884)
+    calibration = reader.calibrate(frame, layout())
+    reading = reader.read(frame, layout(), calibration)
+    for doubtful in (
+        reading.rejected(Rejection.DECREASED),
+        dataclasses.replace(reading, confidence=0.5),
+        dataclasses.replace(reading, residual=0.3),
+        dataclasses.replace(reading, light=0.0),
+        dataclasses.replace(reading, wheels=(Reading(1.0, 0.9), *reading.wheels[1:])),
+    ):
+        assert reader.adapt(calibration, doubtful) is calibration

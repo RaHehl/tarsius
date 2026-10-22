@@ -151,6 +151,7 @@ def test_invalid_dial() -> None:
         ({"score": 2.0}, "score"),
         ({"agreement": -0.1}, "agreement"),
         ({"orientation_margin": float("inf")}, "orientation_margin"),
+        ({"light": 300.0}, "light"),
     ],
 )
 def test_calibration_values_are_checked(change: dict[str, Any], match: str) -> None:

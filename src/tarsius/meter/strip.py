@@ -69,9 +69,13 @@ class Calibration:
     # raster, 0 to 1. Around 0.8 when the window is found well, around 0.3
     # when the readings are wrong; low values mean the window needs fixing.
     agreement: float = 0.0
-    # Exposure of each wheel, then each dial, on the calibration frames; a
-    # read faults on departures from it. Empty: fixed limits only.
+    # Exposure of each wheel, then each dial, at the light level below; a
+    # read faults on departures from it. Empty: fixed limits only, until
+    # MeterReader.adapt() takes it from accepted readings.
     exposure: tuple[Exposure, ...] = ()
+    # Mean grey of the frames the exposure belongs to; reads are scaled to
+    # it first, so a darker or brighter scene is no fault. 0: unknown.
+    light: float = 0.0
 
     def __post_init__(self) -> None:
         """Reject values a calibration cannot have; raises MeterDataError."""
@@ -85,6 +89,7 @@ class Calibration:
         checks.number(self.orientation_margin, "orientation_margin")
         checks.within(checks.number(self.score, "score"), 0.0, 1.0, "score")
         checks.within(checks.number(self.agreement, "agreement"), 0.0, 1.0, "agreement")
+        checks.within(checks.number(self.light, "light"), 0.0, 255.0, "light")
 
     def as_dict(self) -> dict[str, Any]:
         """Return a JSON-compatible form."""
@@ -97,6 +102,7 @@ class Calibration:
             "score": self.score,
             "agreement": self.agreement,
             "exposure": [item.as_list() for item in self.exposure],
+            "light": self.light,
         }
 
     @classmethod
@@ -111,6 +117,7 @@ class Calibration:
                 data.get("score", 0.0),
                 data.get("agreement", 0.0),
                 _exposure(data.get("exposure", [])),
+                data.get("light", 0.0),
             )
         except KeyError as err:
             raise MeterDataError(f"invalid calibration: missing {err}") from err
