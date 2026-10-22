@@ -622,3 +622,10 @@ def test_misreads_followed_are_bounded() -> None:
 def test_misreads_must_be_triples() -> None:
     with pytest.raises(MeterDataError, match="offset, value, time"):
         PlausibilityState(1.0, T0, misreads=(10.0,))  # type: ignore[arg-type]
+
+
+def test_higher_alternative_measured_against_its_own_wheel() -> None:
+    # Three decimal wheels, no dials: a tens wheel misread by one digit.
+    guard = _guard(123.456)
+    reading = MeterReading(113.5, 113.5, None, 0.9, 0.1, 0.001, (), (), (123.5,))
+    assert guard.review(reading, T0 + 5 * MINUTE).value == 123.5

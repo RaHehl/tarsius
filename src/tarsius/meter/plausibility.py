@@ -324,9 +324,11 @@ class Plausibility:
             options.append((last.value, last.offset))
         judged = [self._against(last, v, at) for v in alternatives]
         for other_rejection, other in judged:
-            # A higher reading only as a misread: just above the last value.
+            # A higher reading only as a misread of the wheel it differs on:
+            # just above the last value.
             if other_rejection is None and (
-                other < value or other - last.value <= MISREAD_SHARE * step
+                other < value
+                or other - last.value <= _misread_rise(other - value, hold)
             ):
                 options.append((other, other - value))
         if options:
@@ -473,6 +475,12 @@ def _disputed(last: PlausibilityState, value: float, at: datetime) -> Dispute:
     if dispute is None or (dispute.value < last.value) != (value < last.value):
         return Dispute(at, at, 1, value)
     return Dispute(dispute.since, at, dispute.count + 1, value)
+
+
+def _misread_rise(difference: float, hold: float) -> float:
+    """Return how far above the last value a misread by ``difference`` may lie."""
+    unit = 10.0 ** math.floor(math.log10(difference))
+    return max(hold, MISREAD_SHARE * unit)
 
 
 def _step(reading: MeterReading) -> float:
