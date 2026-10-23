@@ -24,6 +24,8 @@ Local image recognition for regions of a camera image:
 
 Everything runs on your machine, without a cloud service and without training on your frames.
 
+In Home Assistant, the custom integration [Local vision](https://github.com/RaHehl/local-vision) brings both as helpers.
+
 Tarsiers are small nocturnal primates whose eyes are each about as large as their brain: lots of eye, little brain, very good at seeing in the dark. That is the idea here too.
 
 ## Install
