@@ -14,7 +14,7 @@ Before a crop goes to its network, its raw grey levels are kept, since the netwo
 
 `calibrate()` decides whether the meter is mounted upside down and searches the cell raster (offset, cell width and height) on one or more frames. It costs about 45 reads, 0.36 s per frame on the i5-8400T; run it at setup and after the camera moved. `calibration.agreement` is the share of the search grid that reads the same whole number, low values mean the window needs fixing. Without a calibration `read()` cuts equal upright cells.
 
-The readers are small numpy networks: 475k parameters for a wheel (32×20 pixels), 168k for a dial. About 18 ms per read of five wheels and four dials on one thread of an i5-8400T, including JPEG decoding. `MeterReader(views=3)` also reads each crop shifted by a pixel and averages, which costs three times as much. The methods block and are safe to call from several threads; the readers load on first use (2.6 MB) and are shared per process.
+The readers are small numpy networks: 475k parameters for a wheel (32×20 pixels), 643k for a dial. About 25 ms per read of five wheels and four dials on one thread of an i5-8400T, including JPEG decoding. `MeterReader(views=3)` also reads each crop shifted by a pixel and averages, which costs three times as much. The methods block and are safe to call from several threads; the readers load on first use (4.5 MB) and are shared per process.
 
 Results so far, one water meter (Corona MWI: five wheels, four dials), 696 frames of 640×480 over two days, compared with the value an existing reader on the same camera reported. Regions taken from that reader, calibrated on ten frames:
 

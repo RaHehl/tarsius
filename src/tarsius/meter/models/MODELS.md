@@ -5,7 +5,7 @@ Trained by Raphael Hehl for tarsius, released with it under Apache-2.0.
 | File | Purpose | Parameters | Runtime | Input |
 |---|---|---|---|---|
 | `digits.npz` | wheel reader: 100 value classes, 5 fault classes, orientation | 475k | numpy engine | 32×20 RGB cell |
-| `dials.npz` | pointer dial reader: 100 value classes | 168k | numpy engine | 32×32 RGB crop |
+| `dials.npz` | pointer dial reader: 100 value classes | 643k | numpy engine | 32×32 RGB crop |
 | `finder.param`, `finder.bin` | ALPHA: counter window segmentation | 181k | ncnn, fp16 weights | 256×256 RGB frame |
 | `dialfinder.param`, `dialfinder.bin` | ALPHA: dial segmentation | 676k | ncnn, fp16 weights | 256×256 grey frame |
 
@@ -29,7 +29,7 @@ photographs of meters are not part of tarsius: they show serial numbers.
 | File | Training run |
 |---|---|
 | `digits.npz` | `jit020_s3`: synthetic plus 50 % Dryad cells, framing jitter 0.20, seed 3 |
-| `dials.npz` | dial reader release of 2026-08-09, synthetic only |
+| `dials.npz` | `f010-s33`: width 2.0, synthetic only, dial faces in open colours, seed 33 |
 | `finder.*` | `finder_faces`: width 1.0, Dryad detection split plus 30 % synthetic faces |
 | `dialfinder.*` | `dialfinder_w2`: width 2.0, synthetic faces, cut-off dials not labelled |
 
