@@ -29,7 +29,7 @@ photographs of meters are not part of tarsius: they show serial numbers.
 | File | Training run |
 |---|---|
 | `digits.npz` | `jit020_s3`: synthetic plus 50 % Dryad cells, framing jitter 0.20, seed 3 |
-| `dials.npz` | `f010-s33`: width 2.0, synthetic only, dial faces in open colours, seed 33 |
+| `dials.npz` | `soft32-s38`: width 2.0, synthetic only, dial faces in open colours, plate continued around the face, numerals at the rim, crops down to 0.94 times the ring, half of them softened, seed 38 |
 | `finder.*` | `finder_faces`: width 1.0, Dryad detection split plus 30 % synthetic faces |
 | `dialfinder.*` | `dialfinder_w2`: width 2.0, synthetic faces, cut-off dials not labelled |
 
