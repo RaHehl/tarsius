@@ -28,7 +28,7 @@ cp "$4" "$WORK/dialfinder.keras"
     cd "$WORK"
     sha256sum -c - <<SUMS
 d1c8c0f14af680b97f923048e9672bcaaf72232cde3bbc0c625a91141041940d  digits.npz
-4de337ec84492717aba85cc1161625818d167eda534ad7fded232ca74014b03d  dials.npz
+e53457003d343ac707b95d6c54f72e06fe93f2c5cde4e284a012d492532e153a  dials.npz
 f8224ab932c0c459c2c884d13ea6dcbce7bd214bc65a14d88995081a38e1ded0  finder.keras
 ce84562e94c2930ca6b9670433835dc51572d1904918a24876ac9cf9fabcfdfb  dialfinder.keras
 SUMS
