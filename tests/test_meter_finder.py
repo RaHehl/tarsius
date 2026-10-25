@@ -252,4 +252,6 @@ def test_dial_boxes_sit_on_the_axes_of_a_tilted_meter(rotation: float) -> None:
         x, y = finder._to_rotated(cx, cy, suggestion.rotation - rotation, SIZE)
         assert (roi.left + roi.right) / 2 * width == pytest.approx(x, abs=2.5)
         assert (roi.top + roi.bottom) / 2 * height == pytest.approx(y, abs=2.5)
-        assert (roi.right - roi.left) * width == pytest.approx(2 * radius, rel=0.06)
+        # Sized to the scale ring, drawn just inside the face.
+        side = 2 * (radius - 3) * finder._RING_MARGIN
+        assert (roi.right - roi.left) * width == pytest.approx(side, rel=0.04)

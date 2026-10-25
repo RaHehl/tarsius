@@ -56,8 +56,10 @@ _DIAL_SIDE = 2.0
 # Dials found on a real meter scored at least 5.8 (median 9.7), other spots
 # of its face 2.7 to 4.5.
 _AXIS_SHARPNESS = 4.0
-# Dial region half side as a multiple of the scale ring's radius.
-_RING_MARGIN = 1.03
+# Dial region half side as a multiple of the scale ring's radius. The dial
+# reader was trained on boxes 1.02 to 1.53 times the ring. At the tight end
+# it read the fastest pointer of a real meter worse.
+_RING_MARGIN = 1.2
 # Share of the strongest edges in a dial's surroundings that vote for its axis.
 _AXIS_EDGES = 0.18
 # Dials larger than this radius in pixels are voted on scaled down.
