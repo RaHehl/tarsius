@@ -8,8 +8,11 @@ regions for a user to confirm and never reads a value itself.
 Two small segmentation networks on ncnn, trained on synthetic faces and the
 Dryad word-wheel water meter photographs: one marks the counter window, one
 marks the pointer dials. The window's rotated rectangle gives the rotation
-that makes it horizontal, the dials are found as discs in the dial mask.
-Box and rotation of a dark window are then measured again in the image.
+that makes it horizontal, and box and rotation of a dark window are then
+measured again in the image. The dial network is not rotation invariant,
+so it looks at the frame turned by that rotation. The dials are found as
+discs in its mask, and each box is moved onto the dial's axis and sized
+to its ring.
 
 Known weakness: trained mostly on one population of meters, it also marks
 a printed serial number. On a European meter with a vertical serial number
@@ -18,9 +21,11 @@ network is surer of, so that one is kept rather than the larger one. That
 found the window on all 735 frames of that meter, also desaturated. Show
 the suggestion to the user.
 
-Takes about 75 ms on one thread of an i5-8400T. Estimated from the
-operation count, a Home Assistant Green needs up to 1 s for the window and
-3.7 s for the dials, so run it at setup or once a day, not per reading.
+Takes about 125 ms on one thread of an i5-8400T, 45 ms of it for turning
+the frame and finding the dial axes, 25 ms for measuring the window again.
+Estimated from the operation count, a Home Assistant Green needs up to
+1 s for the window and 3.7 s for the dial network, so run it at setup or
+once a day, not per reading.
 """
 
 from __future__ import annotations
@@ -50,6 +55,24 @@ _DIAL_MODEL = "dialfinder"
 _DIAL_GRID = 128
 # Dial region side as a multiple of the radius to the edge of the mask.
 _DIAL_SIDE = 2.0
+# Axis votes must peak this many times over their mean to move a dial box.
+# The 240 dials found on 60 frames of a real meter scored at least 6.6
+# (median 9.7). Other spots of its face scored a median of 3.5, and 5 % of
+# them 5.5 or more. Below 5.5 a mask disc 0.7 times the dial voted for a
+# wrong axis on a synthetic face.
+_AXIS_SHARPNESS = 5.5
+# The box stays when the ring lies inside this multiple of the mask's
+# radius. On that meter it lay at 0.82 to 1.13. The ring search ends at 1.3
+# times the radius, which bounds it from above.
+_RING_MIN = 0.6
+# Dial region half side as a multiple of the scale ring's radius. The dial
+# reader was trained on crops 1.02 to 1.53 times the ring. On a real meter
+# regions set by hand at about 1.1 times the ring were rejected more often.
+_RING_MARGIN = 1.2
+# Share of the strongest edges in a dial's surroundings that vote for its axis.
+_AXIS_EDGES = 0.18
+# Dials larger than this radius in pixels are voted on scaled down.
+_AXIS_RADIUS = 64
 
 # The tightened window is kept only when it overlaps the mask's box this
 # much; on the meter the finder was measured on the two overlap by 0.83.
@@ -370,8 +393,12 @@ def _turned(box: Box, rotation: float, size: tuple[int, int]) -> Box:
 
 def _dials(frame: Image.Image, rotation: float) -> list[tuple[Roi, float]]:
     """Return dial regions in the rotated frame, clockwise from twelve."""
-    logits = _NETS[_DIAL_MODEL].logits(frame.convert("L").convert("RGB"))
-    width, height = frame.size
+    # The dial network is not rotation invariant, it looks at the level frame.
+    level = frame.rotate(rotation, Image.Resampling.BILINEAR) if rotation else frame
+    grey = level.convert("L")
+    logits = _NETS[_DIAL_MODEL].logits(grey.convert("RGB"))
+    levels: Floats = np.asarray(grey, np.float32)
+    width, height = level.size
     scale = _DIAL_GRID / max(width, height)
     grid = (max(1, round(width * scale)), max(1, round(height * scale)))
     # Resample to square cells, so discs are round for the distance transform.
@@ -388,11 +415,10 @@ def _dials(frame: Image.Image, rotation: float) -> list[tuple[Roi, float]]:
         x, y, r = (gx + 0.5) / scale, (gy + 0.5) / scale, (radius + 0.5) / scale
         yy, xx = np.ogrid[: square.shape[0], : square.shape[1]]
         inside = (xx - gx) ** 2 + (yy - gy) ** 2 <= radius**2
-        rx, ry = _to_rotated(x, y, rotation, frame.size)
-        half = r * _DIAL_SIDE / 2
-        roi = _clamped(rx - half, ry - half, rx + half, ry + half, frame.size)
+        x, y, half = _on_axis(levels, x, y, r)
+        roi = _clamped(x - half, y - half, x + half, y + half, level.size)
         if roi is not None:
-            found.append((rx, ry, roi, float(square[inside].mean())))
+            found.append((x, y, roi, float(square[inside].mean())))
     if not found:
         return []
     mx = float(np.mean([f[0] for f in found]))
@@ -400,6 +426,123 @@ def _dials(frame: Image.Image, rotation: float) -> list[tuple[Roi, float]]:
     # Clockwise on screen from twelve o'clock, y grows downwards.
     found.sort(key=lambda f: math.atan2(f[0] - mx, my - f[1]) % (2 * math.pi))
     return [(roi, score) for _, _, roi, score in found]
+
+
+def _on_axis(
+    levels: Floats, x: float, y: float, radius: float
+) -> tuple[float, float, float]:
+    """
+    Return centre and half side of a dial box, moved onto the dial's axis.
+
+    The mask runs into the lettering beside a dial and has dents, so the
+    centre of its largest disc of ``radius`` lies beside the axis, by a
+    median of about 6 % of the diameter on a real meter. Where the axis vote
+    is not clear or the ring is implausible for the disc, the mask's box
+    stays. A moved box is shrunk about the axis to stay inside the frame.
+    """
+    ax, ay, ring, sharpness = _recentre(levels, x, y, radius)
+    if sharpness < _AXIS_SHARPNESS or ring < _RING_MIN * radius:
+        return x, y, radius * _DIAL_SIDE / 2
+    height, width = levels.shape
+    return ax, ay, min(ring * _RING_MARGIN, ax, ay, width - ax, height - ay)
+
+
+def _recentre(
+    levels: Floats, x: float, y: float, radius: float
+) -> tuple[float, float, float, float]:
+    """
+    Return axis, ring radius and vote sharpness of a dial roughly at ``x, y``.
+
+    A dial face is radially symmetric: ring, ticks and numerals lie on
+    circles about the axis, so the gradient of every edge on them points
+    towards the axis or away from it. Each strong edge votes along its
+    gradient both ways, over the plausible radii, and the votes pile up on
+    the axis. Neither colour nor brightness is used: a red hub is the
+    nearest feature, and a ring may be darker or lighter than its ground.
+    The sharpness is the smoothed vote peak over its mean.
+    """
+    height, width = levels.shape
+    half = max(8.0, radius * 1.6)
+    left, top = max(0, round(x - half)), max(0, round(y - half))
+    right, bottom = min(width, round(x + half)), min(height, round(y + half))
+    if right - left < 12 or bottom - top < 12:
+        return x, y, radius, 0.0
+    patch: Floats = levels[top:bottom, left:right]
+    # Large dials are voted on at a bounded size, the time grows with it.
+    scale = min(1.0, _AXIS_RADIUS / radius)
+    if scale < 1.0:
+        size = (round(patch.shape[1] * scale), round(patch.shape[0] * scale))
+        patch = np.asarray(
+            Image.fromarray(patch, mode="F").resize(size, Image.Resampling.BILINEAR),
+            np.float32,
+        )
+    r = radius * scale
+    gx, gy = _sobel(patch)
+    strength = np.hypot(gx, gy)
+    limit = max(float(np.quantile(strength, 1 - _AXIS_EDGES)), 1e-6)
+    ys, xs = np.nonzero(strength > limit)
+    if len(xs) < 24:
+        return x, y, radius, 0.0
+    weight = strength[ys, xs]
+    ux, uy = gx[ys, xs] / weight, gy[ys, xs] / weight
+    radii = np.arange(0.6 * r, 1.15 * r + 1e-6, max(1.0, r * 0.06))
+    steps = np.concatenate([radii, -radii])[:, None]
+    vx = np.rint(xs + steps * ux).astype(np.intp)
+    vy = np.rint(ys + steps * uy).astype(np.intp)
+    rows, cols = patch.shape
+    ok = (vx >= 0) & (vx < cols) & (vy >= 0) & (vy < rows)
+    votes = np.bincount(
+        vy[ok] * cols + vx[ok],
+        weights=np.broadcast_to(weight, vx.shape)[ok],
+        minlength=rows * cols,
+    ).reshape(rows, cols)
+    # The votes scatter about the axis, a box filter makes them one peak.
+    pile = _box_sum(votes, max(1, round(r * 0.12)))
+    iy, ix = np.unravel_index(int(np.argmax(pile)), pile.shape)
+    sharpness = float(pile.max()) / (float(pile.mean()) + 1e-9)
+    # The ring is the circle about the axis with the strongest edges.
+    edges = np.arange(0.35 * r, 1.3 * r, max(1.0, r * 0.05))
+    yy, xx = np.mgrid[0:rows, 0:cols]
+    band = np.digitize(np.hypot(xx - ix, yy - iy), edges) - 1
+    inner = (band >= 0) & (band < len(edges) - 1)
+    sums = np.bincount(band[inner], strength[inner], minlength=len(edges) - 1)
+    counts = np.bincount(band[inner], minlength=len(edges) - 1)
+    profile = sums / np.maximum(counts, 1)
+    ring = float(edges[int(np.argmax(profile))]) + r * 0.025
+    return (
+        left + (float(ix) + 0.5) / scale,
+        top + (float(iy) + 0.5) / scale,
+        ring / scale,
+        sharpness,
+    )
+
+
+def _sobel(levels: Floats) -> tuple[Floats, Floats]:
+    """Return the 3x3 Sobel gradients, zero on the border."""
+    gx = np.zeros_like(levels)
+    gy = np.zeros_like(levels)
+    across = levels[:-2] + 2 * levels[1:-1] + levels[2:]
+    gx[1:-1, 1:-1] = across[:, 2:] - across[:, :-2]
+    down = levels[:, :-2] + 2 * levels[:, 1:-1] + levels[:, 2:]
+    gy[1:-1, 1:-1] = down[2:] - down[:-2]
+    return gx, gy
+
+
+def _box_sum(values: Floats, k: int) -> Floats:
+    """Return the sum over the (2k+1)-square around each cell, clipped at edges."""
+    rows, cols = values.shape
+    cum = np.pad(values, ((1, 0), (1, 0))).cumsum(0).cumsum(1)
+    lo_y = np.clip(np.arange(rows) - k, 0, rows)
+    hi_y = np.clip(np.arange(rows) + k + 1, 0, rows)
+    lo_x = np.clip(np.arange(cols) - k, 0, cols)
+    hi_x = np.clip(np.arange(cols) + k + 1, 0, cols)
+    total: Floats = (
+        cum[np.ix_(hi_y, hi_x)]
+        - cum[np.ix_(lo_y, hi_x)]
+        - cum[np.ix_(hi_y, lo_x)]
+        + cum[np.ix_(lo_y, lo_x)]
+    )
+    return total
 
 
 def _discs(mask: Mask) -> list[tuple[int, int, float]]:

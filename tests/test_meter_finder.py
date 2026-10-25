@@ -5,8 +5,9 @@ import warnings
 from pathlib import Path
 
 import numpy as np
+import numpy.typing as npt
 import pytest
-from meter_scenes import SIZE, WINDOW, layout, meter_frame
+from meter_scenes import DIALS, SIZE, WINDOW, dial_face, layout, meter_frame
 from PIL import Image, ImageDraw, ImageFilter
 
 from tarsius import BackendError, BlankFrameError, Roi
@@ -177,6 +178,148 @@ def test_unloadable_model(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> No
     monkeypatch.setattr(finder, "_NETS", {n: finder._Net(n) for n in finder._NETS})
     with pytest.raises(BackendError, match="could not load"):
         suggest(meter_frame())
+
+
+def _dial_scene(
+    radius: int, centre: tuple[int, int], size: tuple[int, int] = (320, 240)
+) -> npt.NDArray[np.float32]:
+    frame = Image.new("RGB", size, (190, 190, 185))
+    frame.paste(dial_face(3.3, radius), (centre[0] - radius, centre[1] - radius))
+    return np.asarray(frame.convert("L"), np.float32)
+
+
+def _disc_scene(radius: int, fill: int, ground: int) -> npt.NDArray[np.float32]:
+    frame = Image.new("L", (360, 300), ground)
+    ImageDraw.Draw(frame).ellipse(
+        (180 - radius, 150 - radius, 180 + radius, 150 + radius), fill=fill
+    )
+    return np.asarray(frame, np.float32)
+
+
+@pytest.mark.parametrize("radius", [40, 100])
+def test_recentre_finds_the_axis_of_an_offset_box(radius: int) -> None:
+    levels = _dial_scene(radius, (160, 120), (360, 300))
+    x, y, ring, sharpness = finder._recentre(
+        levels, 160 + 0.2 * radius, 120 - 0.15 * radius, radius
+    )
+    assert (x, y) == pytest.approx((160, 120), abs=2)
+    # The scale ring is drawn just inside the face.
+    assert ring == pytest.approx(radius - 3, abs=0.05 * radius)
+    assert sharpness > 13
+
+
+@pytest.mark.parametrize(("fill", "ground"), [(60, 200), (200, 60)])
+@pytest.mark.parametrize("radius", [36, 44])
+def test_recentre_votes_both_ways_along_the_gradient(
+    fill: int, ground: int, radius: int
+) -> None:
+    # A darker and a lighter disc, a little inside and outside the ring
+    # radius the mask suggests.
+    x, y, ring, sharpness = finder._recentre(
+        _disc_scene(40, fill, ground), 184, 146, radius
+    )
+    assert (x, y) == pytest.approx((180, 150), abs=1)
+    assert ring == pytest.approx(40, abs=2)
+    assert sharpness > 15
+
+
+def test_recentre_votes_through_noise() -> None:
+    levels = _dial_scene(50, (180, 150), (360, 300))
+    levels += np.random.default_rng(2).normal(0, 40, levels.shape).astype(np.float32)
+    x, y, _, sharpness = finder._recentre(levels, 188, 144, 50)
+    assert (x, y) == pytest.approx((180, 150), abs=3)
+    # Only the strongest edges vote, the noise's would flatten the peak.
+    assert sharpness > 8
+
+
+def test_on_axis_moves_the_box_to_the_ring() -> None:
+    levels = _dial_scene(50, (150, 110))
+    x, y, half = finder._on_axis(levels, 158, 103, 54)
+    assert (x, y) == pytest.approx((150, 110), abs=1.5)
+    # Half side 1.2 times the scale ring, drawn 3 pixels inside the face.
+    assert half == pytest.approx(47 * 1.2, abs=2.5)
+
+
+def test_on_axis_shrinks_a_box_at_the_frame_edge() -> None:
+    # The ring's box would reach 7 pixels beyond the left edge.
+    levels = _dial_scene(40, (40, 150), (360, 300))
+    x, y, half = finder._on_axis(levels, 46, 150, 40)
+    assert (x, y) == pytest.approx((40, 150), abs=1)
+    # Square and still centred on the axis, not cut on one side.
+    assert half == pytest.approx(x)
+
+
+def test_on_axis_keeps_the_box_without_a_clear_vote() -> None:
+    rng = np.random.default_rng(1)
+    noise = rng.uniform(0, 255, (240, 320)).astype(np.float32)
+    assert finder._recentre(noise, 160, 120, 50)[3] < 3
+    assert finder._on_axis(noise, 160, 120, 50) == (160, 120, 50)
+    # Nothing to vote with: a flat patch, or one cut off by the frame.
+    flat = np.full((240, 320), 128, np.float32)
+    assert finder._recentre(flat, 160, 120, 50) == (160, 120, 50, 0.0)
+    assert finder._recentre(noise, 2, 2, 4) == (2, 2, 4, 0.0)
+
+
+@pytest.mark.parametrize(("radius", "low", "high"), [(30, 4.0, 5.0), (35, 5.0, 5.5)])
+def test_on_axis_keeps_the_box_for_a_weak_vote(
+    radius: int, low: float, high: float
+) -> None:
+    # A mask disc of 0.6 or 0.7 times the dial's radius: the vote peaks off
+    # the axis and only a little, as on spots beside the dials of a real meter.
+    levels = _dial_scene(50, (180, 150), (360, 300))
+    x, y, _, sharpness = finder._recentre(levels, 185, 146, radius)
+    assert abs(x - 180) + abs(y - 150) > 10
+    assert low < sharpness < high
+    assert finder._on_axis(levels, 185, 146, radius) == (185, 146, radius)
+
+
+def test_on_axis_keeps_the_box_when_the_ring_is_far_inside_the_mask() -> None:
+    # On a tiny dial the numerals outweigh the ring, which comes out at
+    # about half the mask's radius. On a real meter it was at least 0.82.
+    levels = _dial_scene(12, (180, 150), (360, 300))
+    _, _, ring, sharpness = finder._recentre(levels, 182.4, 150, 12)
+    assert ring < 0.6 * 12
+    assert sharpness > 5
+    assert finder._on_axis(levels, 182.4, 150, 12) == (182.4, 150, 12)
+
+
+def test_dials_are_segmented_in_the_level_frame(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    frame = meter_frame(rotation=30)
+    seen: list[Image.Image] = []
+    net = finder._NETS[finder._DIAL_MODEL]
+    logits = net.logits
+
+    def spy(image: Image.Image) -> npt.NDArray[np.float32]:
+        seen.append(image)
+        return logits(image)
+
+    monkeypatch.setattr(net, "logits", spy)
+    finder._dials(frame, 30.0)
+    finder._dials(frame, 0.0)
+    level = frame.rotate(30.0, Image.Resampling.BILINEAR).convert("L")
+    assert np.array_equal(np.asarray(seen[0]), np.asarray(level.convert("RGB")))
+    assert np.array_equal(
+        np.asarray(seen[1]), np.asarray(frame.convert("L").convert("RGB"))
+    )
+
+
+@pytest.mark.parametrize("rotation", [-30, 25, 45])
+def test_dial_boxes_sit_on_the_axes_of_a_tilted_meter(rotation: float) -> None:
+    suggestion = suggest(meter_frame(rotation=rotation))
+    width, height = SIZE
+    assert len(suggestion.dials) == 2
+    for roi, (cx, cy, radius) in zip(
+        sorted(suggestion.dials, key=lambda r: r.left), DIALS, strict=True
+    ):
+        # Turned back by the measured rotation, which may be off a little.
+        x, y = finder._to_rotated(cx, cy, suggestion.rotation - rotation, SIZE)
+        assert (roi.left + roi.right) / 2 * width == pytest.approx(x, abs=2.5)
+        assert (roi.top + roi.bottom) / 2 * height == pytest.approx(y, abs=2.5)
+        # Sized to the scale ring, drawn just inside the face.
+        side = 2 * (radius - 3) * 1.2
+        assert (roi.right - roi.left) * width == pytest.approx(side, rel=0.04)
 
 
 def _window_scene(
