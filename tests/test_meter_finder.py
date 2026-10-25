@@ -260,14 +260,17 @@ def test_on_axis_keeps_the_box_without_a_clear_vote() -> None:
     assert finder._recentre(noise, 2, 2, 4) == (2, 2, 4, 0.0)
 
 
-def test_on_axis_keeps_the_box_for_a_weak_vote() -> None:
-    # A mask disc of 0.6 times the dial's radius: the vote peaks off the
-    # axis and only a little, as on spots beside the dials of a real meter.
+@pytest.mark.parametrize(("radius", "low", "high"), [(30, 4.0, 5.0), (35, 5.0, 5.5)])
+def test_on_axis_keeps_the_box_for_a_weak_vote(
+    radius: int, low: float, high: float
+) -> None:
+    # A mask disc of 0.6 or 0.7 times the dial's radius: the vote peaks off
+    # the axis and only a little, as on spots beside the dials of a real meter.
     levels = _dial_scene(50, (180, 150), (360, 300))
-    x, y, _, sharpness = finder._recentre(levels, 185, 146, 30)
+    x, y, _, sharpness = finder._recentre(levels, 185, 146, radius)
     assert abs(x - 180) + abs(y - 150) > 10
-    assert 4 < sharpness < 5
-    assert finder._on_axis(levels, 185, 146, 30) == (185, 146, 30)
+    assert low < sharpness < high
+    assert finder._on_axis(levels, 185, 146, radius) == (185, 146, radius)
 
 
 def test_on_axis_keeps_the_box_when_the_ring_is_far_inside_the_mask() -> None:

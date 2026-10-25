@@ -57,9 +57,10 @@ _DIAL_GRID = 128
 _DIAL_SIDE = 2.0
 # Axis votes must peak this many times over their mean to move a dial box.
 # The 240 dials found on 60 frames of a real meter scored at least 6.6
-# (median 9.7). Other spots of its face scored a median of 3.5, and 9 % of
-# them 5 or more.
-_AXIS_SHARPNESS = 5.0
+# (median 9.7). Other spots of its face scored a median of 3.5, and 5 % of
+# them 5.5 or more. Below 5.5 a mask disc 0.7 times the dial voted for a
+# wrong axis on a synthetic face.
+_AXIS_SHARPNESS = 5.5
 # The box stays when the ring lies inside this multiple of the mask's
 # radius. On that meter it lay at 0.82 to 1.13. The ring search ends at 1.3
 # times the radius, which bounds it from above.
