@@ -8,10 +8,11 @@ regions for a user to confirm and never reads a value itself.
 Two small segmentation networks on ncnn, trained on synthetic faces and the
 Dryad word-wheel water meter photographs: one marks the counter window, one
 marks the pointer dials. The window's rotated rectangle gives the rotation
-that makes it horizontal. The dial network is not rotation invariant, so it
-looks at the frame turned level; the dials are found as discs in its mask,
-and each box is then moved onto the dial's axis and sized to its ring.
-Box and rotation of a dark window are then measured again in the image.
+that makes it horizontal, and box and rotation of a dark window are then
+measured again in the image. The dial network is not rotation invariant,
+so it looks at the frame turned by that rotation. The dials are found as
+discs in its mask, and each box is moved onto the dial's axis and sized
+to its ring.
 
 Known weakness: trained mostly on one population of meters, it also marks
 a printed serial number. On a European meter with a vertical serial number
@@ -20,8 +21,8 @@ network is surer of, so that one is kept rather than the larger one. That
 found the window on all 735 frames of that meter, also desaturated. Show
 the suggestion to the user.
 
-Takes about 115 ms on one thread of an i5-8400T, 40 ms of it for turning
-the frame and finding the axes, 25 ms for measuring the window again.
+Takes about 125 ms on one thread of an i5-8400T, 45 ms of it for turning
+the frame and finding the dial axes, 25 ms for measuring the window again.
 Estimated from the operation count, a Home Assistant Green needs up to
 1 s for the window and 3.7 s for the dial network, so run it at setup or
 once a day, not per reading.
@@ -55,12 +56,17 @@ _DIAL_GRID = 128
 # Dial region side as a multiple of the radius to the edge of the mask.
 _DIAL_SIDE = 2.0
 # Axis votes must peak this many times over their mean to move a dial box.
-# Dials found on a real meter scored at least 5.8 (median 9.7), other spots
-# of its face 2.7 to 4.5.
-_AXIS_SHARPNESS = 4.0
+# The 240 dials found on 60 frames of a real meter scored at least 6.6
+# (median 9.7). Other spots of its face scored a median of 3.5, and 9 % of
+# them 5 or more.
+_AXIS_SHARPNESS = 5.0
+# The box stays when the ring lies inside this multiple of the mask's
+# radius. On that meter it lay at 0.82 to 1.13. The ring search ends at 1.3
+# times the radius, which bounds it from above.
+_RING_MIN = 0.6
 # Dial region half side as a multiple of the scale ring's radius. The dial
-# reader was trained on boxes 1.02 to 1.53 times the ring. At the tight end
-# it read the fastest pointer of a real meter worse.
+# reader was trained on crops 1.02 to 1.53 times the ring. On a real meter
+# regions set by hand at about 1.1 times the ring were rejected more often.
 _RING_MARGIN = 1.2
 # Share of the strongest edges in a dial's surroundings that vote for its axis.
 _AXIS_EDGES = 0.18
@@ -408,7 +414,7 @@ def _dials(frame: Image.Image, rotation: float) -> list[tuple[Roi, float]]:
         x, y, r = (gx + 0.5) / scale, (gy + 0.5) / scale, (radius + 0.5) / scale
         yy, xx = np.ogrid[: square.shape[0], : square.shape[1]]
         inside = (xx - gx) ** 2 + (yy - gy) ** 2 <= radius**2
-        x, y, half = _on_axis(levels, x, y, r * _DIAL_SIDE / 2)
+        x, y, half = _on_axis(levels, x, y, r)
         roi = _clamped(x - half, y - half, x + half, y + half, level.size)
         if roi is not None:
             found.append((x, y, roi, float(square[inside].mean())))
@@ -422,19 +428,22 @@ def _dials(frame: Image.Image, rotation: float) -> list[tuple[Roi, float]]:
 
 
 def _on_axis(
-    levels: Floats, x: float, y: float, half: float
+    levels: Floats, x: float, y: float, radius: float
 ) -> tuple[float, float, float]:
     """
     Return centre and half side of a dial box, moved onto the dial's axis.
 
     The mask runs into the lettering beside a dial and has dents, so the
-    centre of its largest disc lies beside the axis, about a tenth of the
-    diameter on a real meter. Where the axis vote is not clear the box stays.
+    centre of its largest disc of ``radius`` lies beside the axis, by a
+    median of about 6 % of the diameter on a real meter. Where the axis vote
+    is not clear or the ring is implausible for the disc, the mask's box
+    stays. A moved box is shrunk about the axis to stay inside the frame.
     """
-    ax, ay, ring, sharpness = _recentre(levels, x, y, half)
-    if sharpness < _AXIS_SHARPNESS:
-        return x, y, half
-    return ax, ay, ring * _RING_MARGIN
+    ax, ay, ring, sharpness = _recentre(levels, x, y, radius)
+    if sharpness < _AXIS_SHARPNESS or ring < _RING_MIN * radius:
+        return x, y, radius * _DIAL_SIDE / 2
+    height, width = levels.shape
+    return ax, ay, min(ring * _RING_MARGIN, ax, ay, width - ax, height - ay)
 
 
 def _recentre(
@@ -486,7 +495,7 @@ def _recentre(
         weights=np.broadcast_to(weight, vx.shape)[ok],
         minlength=rows * cols,
     ).reshape(rows, cols)
-    # The votes scatter about the axis; a box filter makes them one peak.
+    # The votes scatter about the axis, a box filter makes them one peak.
     pile = _box_sum(votes, max(1, round(r * 0.12)))
     iy, ix = np.unravel_index(int(np.argmax(pile)), pile.shape)
     sharpness = float(pile.max()) / (float(pile.mean()) + 1e-9)
