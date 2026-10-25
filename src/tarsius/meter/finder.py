@@ -9,6 +9,7 @@ Two small segmentation networks on ncnn, trained on synthetic faces and the
 Dryad word-wheel water meter photographs: one marks the counter window, one
 marks the pointer dials. The window's rotated rectangle gives the rotation
 that makes it horizontal, the dials are found as discs in the dial mask.
+Box and rotation of a dark window are then measured again in the image.
 
 Known weakness: trained mostly on one population of meters, it also marks
 a printed serial number. On a European meter with a vertical serial number
@@ -17,7 +18,7 @@ network is surer of, so that one is kept rather than the larger one. That
 found the window on all 735 frames of that meter, also desaturated. Show
 the suggestion to the user.
 
-Takes about 50 ms on one thread of an i5-8400T. Estimated from the
+Takes about 75 ms on one thread of an i5-8400T. Estimated from the
 operation count, a Home Assistant Green needs up to 1 s for the window and
 3.7 s for the dials, so run it at setup or once a day, not per reading.
 """
@@ -37,7 +38,7 @@ from PIL import Image
 
 from ..errors import BackendError
 from ..roi import Roi
-from .frame import decode_frame
+from .frame import crop, decode_frame
 from .layout import Dial, MeterLayout
 
 __alpha__ = True
@@ -50,8 +51,21 @@ _DIAL_GRID = 128
 # Dial region side as a multiple of the radius to the edge of the mask.
 _DIAL_SIDE = 2.0
 
+# The tightened window is kept only when it overlaps the mask's box this
+# much; on the meter the finder was measured on the two overlap by 0.83.
+_WINDOW_IOU = 0.6
+# Residual tilt searched on the window's top and bottom edges, in degrees.
+_TILT_RANGE = 3.0
+_TILT_STEP = 0.1
+# A tilt is corrected only when it sharpens those edges by this factor. On
+# a 211 pixel wide window that is about half a degree, where its ends move
+# by a pixel; correcting smaller tilts cost readings there.
+_TILT_GAIN = 1.05
+
 type Mask = npt.NDArray[np.bool_]
 type Floats = npt.NDArray[np.float32]
+type Box = tuple[float, float, float, float]
+type Profile = npt.NDArray[np.float64]
 
 
 class AlphaWarning(FutureWarning):
@@ -196,8 +210,162 @@ def _window(frame: Image.Image) -> tuple[float, Roi | None, float]:
     half_v = float(np.abs(v).max()) + height / rows / 2
     rotation = math.degrees(angle)
     rx, ry = _to_rotated(cx, cy, rotation, frame.size)
-    roi = _clamped(rx - half_u, ry - half_v, rx + half_u, ry + half_v, frame.size)
-    return rotation, roi, score
+    rotation, box = _refined(
+        frame, rotation, (rx - half_u, ry - half_v, rx + half_u, ry + half_v)
+    )
+    return rotation, _clamped(*box, frame.size), score
+
+
+def _refined(frame: Image.Image, rotation: float, box: Box) -> tuple[float, Box]:
+    """
+    Return rotation and window box, tightened to the window where that is safe.
+
+    The mask's box reaches half a mask cell beyond its outermost cell, so it
+    is too large, and the rotation from the mask scatters by half a degree.
+    Both are measured again in the image, assuming a dark window on a
+    lighter face. Where that does not hold the result differs much from the
+    mask's box and the mask's box is kept.
+    """
+    tight = _tightened(frame, rotation, box)
+    if tight is None:
+        return rotation, box
+    tilt = _tilt(frame, rotation, tight)
+    if tilt:
+        turned = _tightened(frame, rotation + tilt, _turned(box, tilt, frame.size))
+        if turned is not None:
+            return rotation + tilt, turned
+    return rotation, tight
+
+
+def _tightened(frame: Image.Image, rotation: float, box: Box) -> Box | None:
+    """
+    Return the dark window around ``box`` in the turned frame, None if unsure.
+
+    The threshold lies midway between the face (the 95th percentile around
+    the box) and the window (the median inside). Rows and columns where at
+    least half the pixels are dark belong to the window; the column profile
+    is smoothed over about a stroke width, so white digits do not cut it.
+    """
+    left, top, right, bottom = box
+    width, height = right - left, bottom - top
+    region = _clamped(
+        left - width / 2, top - height, right + width / 2, bottom + height, frame.size
+    )
+    if region is None:
+        return None
+    x0, y0, _, _ = region.box(frame.size)
+    levels = np.asarray(crop(frame, region, rotation).convert("L"), np.float32)
+    inside = levels[
+        max(0, round(top) - y0) : max(0, round(bottom) - y0),
+        max(0, round(left) - x0) : max(0, round(right) - x0),
+    ]
+    if not inside.size:
+        return None
+    face = float(np.percentile(levels, 95))
+    dark = levels < (face + float(np.median(inside))) / 2
+    middle = dark[:, round(left + width / 4) - x0 : round(right - width / 4) - x0]
+    rows = _run(_smooth(middle.mean(1), height * 0.04))
+    if rows is None:
+        return None
+    trim = (rows[1] - rows[0]) // 4
+    cols = _run(_smooth(dark[rows[0] + trim : rows[1] - trim].mean(0), height * 0.12))
+    if cols is None:
+        return None
+    tight = (x0 + cols[0], y0 + rows[0], x0 + cols[1], y0 + rows[1])
+    return tight if _iou(tight, box) >= _WINDOW_IOU else None
+
+
+def _tilt(frame: Image.Image, rotation: float, box: Box) -> float:
+    """
+    Return the residual tilt in degrees that makes the window level, or 0.
+
+    The window's top and bottom edges are sharpest in the row profile when
+    the window lies level. A best tilt at the end of the search range may
+    lie beyond it, and one that barely sharpens the edges is noise.
+    """
+    left, top, right, bottom = box
+    width, height = right - left, bottom - top
+    centre = _to_rotated((left + right) / 2, (top + bottom) / 2, -rotation, frame.size)
+    size = (round(width * 0.8), round(height * 1.5))
+    steps = round(_TILT_RANGE / _TILT_STEP)
+    tilts = np.arange(-steps, steps + 1) * _TILT_STEP
+    grey = frame.convert("L")
+    sharpness = [
+        _edges(_around(grey, centre, rotation + tilt, size).mean(1)) for tilt in tilts
+    ]
+    best = int(np.argmax(sharpness))
+    if best in (0, len(tilts) - 1) or sharpness[best] < _TILT_GAIN * sharpness[steps]:
+        return 0.0
+    return float(tilts[best])
+
+
+def _edges(profile: Floats) -> float:
+    """Return the strongest step in each half of a profile, added."""
+    steps = np.abs(np.diff(profile))
+    half = len(steps) // 2
+    return float(steps[:half].max() + steps[half:].max())
+
+
+def _around(
+    grey: Image.Image,
+    centre: tuple[float, float],
+    rotation: float,
+    size: tuple[int, int],
+) -> Floats:
+    """Return the levels of ``size`` about a frame point, turned by ``rotation``."""
+    angle = -math.radians(rotation)
+    a, b = math.cos(angle), math.sin(angle)
+    x, y = centre
+    width, height = size
+    patch = grey.transform(
+        size,
+        Image.Transform.AFFINE,
+        (
+            a,
+            b,
+            x - a * width / 2 - b * height / 2,
+            -b,
+            a,
+            y + b * width / 2 - a * height / 2,
+        ),
+        resample=Image.Resampling.BILINEAR,
+    )
+    return np.asarray(patch, np.float32)
+
+
+def _smooth(profile: Profile, width: float) -> Profile:
+    """Return a running mean over an odd number of samples near ``width``."""
+    k = 2 * max(0, round((width - 1) / 2)) + 1
+    smooth: Profile = np.convolve(profile, np.ones(k) / k, mode="same")
+    return smooth
+
+
+def _run(profile: Profile) -> tuple[int, int] | None:
+    """Return the run of a profile above one half that holds its middle."""
+    above = np.concatenate([[False], profile > 0.5, [False]])
+    starts, ends = np.flatnonzero(np.diff(above.astype(np.int8))).reshape(-1, 2).T
+    middle = len(profile) / 2
+    for start, end in zip(starts, ends, strict=True):
+        if start <= middle < end:
+            return int(start), int(end)
+    return None
+
+
+def _iou(a: Box, b: Box) -> float:
+    """Return the intersection over union of two boxes."""
+    width = max(0.0, min(a[2], b[2]) - max(a[0], b[0]))
+    height = max(0.0, min(a[3], b[3]) - max(a[1], b[1]))
+    inter = width * height
+    union = (a[2] - a[0]) * (a[3] - a[1]) + (b[2] - b[0]) * (b[3] - b[1]) - inter
+    return inter / union
+
+
+def _turned(box: Box, rotation: float, size: tuple[int, int]) -> Box:
+    """Return a box of the same size about its centre turned ``rotation`` further."""
+    left, top, right, bottom = box
+    x, y = _to_rotated((left + right) / 2, (top + bottom) / 2, rotation, size)
+    half_w, half_h = (right - left) / 2, (bottom - top) / 2
+    return x - half_w, y - half_h, x + half_w, y + half_h
 
 
 def _dials(frame: Image.Image, rotation: float) -> list[tuple[Roi, float]]:

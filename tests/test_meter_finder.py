@@ -6,8 +6,8 @@ from pathlib import Path
 
 import numpy as np
 import pytest
-from meter_scenes import layout, meter_frame
-from PIL import Image, ImageDraw
+from meter_scenes import SIZE, WINDOW, layout, meter_frame
+from PIL import Image, ImageDraw, ImageFilter
 
 from tarsius import BackendError, BlankFrameError, Roi
 from tarsius.meter import MeterLayout, MeterReader, finder
@@ -177,3 +177,113 @@ def test_unloadable_model(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> No
     monkeypatch.setattr(finder, "_NETS", {n: finder._Net(n) for n in finder._NETS})
     with pytest.raises(BackendError, match="could not load"):
         suggest(meter_frame())
+
+
+def _window_scene(
+    ground: int = 215,
+    window: tuple[int, int, int, int] = (200, 150, 420, 220),
+    tilt: float = 0.0,
+) -> Image.Image:
+    """Return a dark wheel strip on a lighter face, with some print around it."""
+    frame = Image.new("RGB", (640, 400), (ground, ground, ground - 5))
+    left, top, right, bottom = window
+    draw = ImageDraw.Draw(frame)
+    draw.rectangle((left, top, right - 1, bottom - 1), fill=(30, 30, 30))
+    pitch = (right - left) / 5
+    for i, digit in enumerate("00628"):
+        draw.text(
+            (left + (i + 0.5) * pitch, (top + bottom) / 2),
+            digit,
+            fill=(230, 230, 230),
+            font_size=(bottom - top) // 2,
+            anchor="mm",
+        )
+    draw.text((430, 170), "m3", fill=(40, 40, 40), font_size=30)
+    draw.text((210, 240), "Qn 2.5 m3/h", fill=(40, 40, 40), font_size=18)
+    # Turned clockwise by tilt, so turning by tilt levels it again.
+    frame = frame.rotate(-tilt, Image.Resampling.BICUBIC, fillcolor=(ground,) * 3)
+    # A camera does not draw edges a pixel sharp.
+    frame = frame.filter(ImageFilter.GaussianBlur(1.5))
+    pixels = np.asarray(frame, np.float32)
+    pixels += np.random.default_rng(0).normal(0, 3, pixels.shape)
+    return Image.fromarray(np.clip(pixels, 0, 255).astype(np.uint8))
+
+
+# The finder's box on a real meter: too wide, mostly to the right, and tall.
+_LOOSE = (196.0, 144.0, 432.0, 224.0)
+
+
+def test_dark_window_is_tightened() -> None:
+    rotation, box = finder._refined(_window_scene(), 0.0, _LOOSE)
+    assert rotation == 0.0
+    assert box == pytest.approx((200, 150, 420, 220), abs=1.5)
+
+
+def test_suggested_window_is_tight() -> None:
+    suggestion = suggest(meter_frame(rotation=20), dials=False)
+    assert suggestion.digits is not None
+    # The window with its dark frame, 8 pixels around the strip.
+    left, top, right, bottom = WINDOW
+    width, height = SIZE
+    tight = Roi(
+        (left - 8) / width,
+        (top - 8) / height,
+        (right + 8) / width,
+        (bottom + 8) / height,
+    )
+    assert _iou(suggestion.digits, tight) > 0.95
+
+
+def test_light_window_keeps_the_finder_box() -> None:
+    light = Image.fromarray(255 - np.asarray(_window_scene(ground=225)))
+    assert finder._tightened(light, 0.0, _LOOSE) is None
+    assert finder._refined(light, 0.0, _LOOSE) == (0.0, _LOOSE)
+
+
+def test_clutter_keeps_the_finder_box() -> None:
+    rng = np.random.default_rng(3)
+    blocks = rng.integers(0, 255, (40, 64), dtype=np.uint8)
+    clutter = Image.fromarray(blocks).resize((640, 400), Image.Resampling.NEAREST)
+    assert finder._refined(clutter.convert("RGB"), 0.0, _LOOSE) == (0.0, _LOOSE)
+
+
+def test_tightening_needs_a_dark_middle() -> None:
+    plain = Image.new("RGB", (640, 400), (200, 200, 200))
+    assert finder._tightened(plain, 0.0, _LOOSE) is None
+    # Dark rows, but light in the middle of them.
+    ImageDraw.Draw(plain).rectangle((200, 150, 420, 220), fill=(30, 30, 30))
+    ImageDraw.Draw(plain).rectangle((295, 150, 325, 220), fill=(200, 200, 200))
+    assert finder._tightened(plain, 0.0, _LOOSE) is None
+    # Nothing, or only the surroundings, of the box inside the frame.
+    assert finder._tightened(plain, 0.0, (-500, -500, -400, -400)) is None
+    assert finder._tightened(plain, 0.0, (-50, -50, -10, -10)) is None
+
+
+@pytest.mark.parametrize("tilt", [-2.0, 1.2])
+def test_residual_tilt_is_corrected(tilt: float) -> None:
+    # Turned clockwise by tilt, so turning by tilt levels it again.
+    frame = _window_scene().rotate(
+        -tilt, Image.Resampling.BICUBIC, fillcolor=(215,) * 3
+    )
+    rotation, box = finder._refined(frame, 0.0, _LOOSE)
+    assert rotation == pytest.approx(tilt, abs=0.15)
+    assert box == pytest.approx((200, 150, 420, 220), abs=2)
+
+
+@pytest.mark.parametrize("tilt", [0.1, 4.0])
+def test_small_or_out_of_range_tilt_is_left(tilt: float) -> None:
+    frame = _window_scene().rotate(
+        -tilt, Image.Resampling.BICUBIC, fillcolor=(215,) * 3
+    )
+    tight = finder._tightened(frame, 0.0, _LOOSE)
+    assert tight is not None
+    assert finder._tilt(frame, 0.0, tight) == 0.0
+
+
+def test_tilted_patch_matches_rotated_crop() -> None:
+    frame = meter_frame(rotation=10).convert("L")
+    centre = finder._to_rotated(300.0, 100.0, -10.0, frame.size)
+    patch = finder._around(frame, centre, 10.0, (80, 40))
+    expected = crop(frame, Roi(260 / 640, 80 / 480, 340 / 640, 120 / 480), 10.0)
+    difference = np.abs(patch - np.asarray(expected, np.float32))
+    assert float(difference.mean()) < 2
